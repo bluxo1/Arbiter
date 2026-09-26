@@ -1,0 +1,146 @@
+name: arbiter
+
+x-app: &app
+  image: arbiter-local:foundation
+  build:
+    context: .
+    target: runtime
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: [/tmp]
+  environment:
+    ARBITER_DB_HOST: postgres
+  networks: [control]
+  mem_limit: 256m
+  cpus: 1
+  pids_limit: 128
+
+services:
+  api:
+    <<: *app
+    networks: [edge, control]
+    secrets: [db_runtime_password]
+    ports: ["127.0.0.1:${ARBITER_API_PORT:-8000}:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  postgres:
+    image: postgres:17.11-bookworm@sha256:639ab7ceb90e13123085b741fb31ef493fba25463002f6da665352e7b534b652
+    environment:
+      POSTGRES_DB: arbiter
+      POSTGRES_USER: arbiter_bootstrap
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_bootstrap_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=scram-sha-256
+    secrets: [db_bootstrap_password]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [control]
+    mem_limit: 512m
+    cpus: 1
+    pids_limit: 128
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, pg_isready, -U, arbiter_bootstrap, -d, arbiter]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis:
+    image: redis:7.2.16-bookworm@sha256:0637954999d01b7c9ce9167db2da50656e2590d3b884f1c600c5f63bb6e6773c
+    command: [redis-server, --appendonly, "yes", --appendfsync, always, --maxmemory, 64mb, --maxmemory-policy, noeviction]
+    volumes: [redis_data:/data]
+    networks: [control]
+    mem_limit: 128m
+    cpus: 1
+    pids_limit: 64
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  ollama:
+    image: ollama/ollama:0.34.4@sha256:8262851b2846b87c649eddf3e76beb270c52f4d1bc94559f47efde16b0841551
+    environment:
+      OLLAMA_MODELS: /models
+      OLLAMA_NO_CLOUD: "1"
+      OLLAMA_NOPRUNE: "1"
+      OLLAMA_NUM_PARALLEL: "2"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_CONTEXT_LENGTH: "4096"
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_LOAD_TIMEOUT: 15m
+      TMPDIR: /tmp
+    volumes: [ollama_models:/models]
+    networks: [provider]
+    gpus: all
+    mem_limit: 6g
+    memswap_limit: 8g
+    cpus: 4
+    pids_limit: 256
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, ollama, list]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  bootstrap:
+    <<: *app
+    profiles: [operations]
+    command: [python, -m, arbiter.operations.bootstrap]
+    secrets: [db_bootstrap_password, db_migration_password, db_operator_password, db_runtime_password]
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  migrate:
+    <<: *app
+    profiles: [operations]
+    command: [python, -m, arbiter.operations.migrate]
+    secrets: [db_migration_password]
+    depends_on:
+      postgres: {condition: service_healthy}
+
+networks:
+  edge: {}
+  control: {internal: true}
+  provider: {internal: true}
+
+volumes:
+  postgres_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${ARBITER_DATA_LINUX_ROOT:?Set the Linux-visible Arbiter data root}/postgres
+  redis_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${ARBITER_DATA_LINUX_ROOT:?Set the Linux-visible Arbiter data root}/redis
+  ollama_models:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${ARBITER_DATA_LINUX_ROOT:?Set the Linux-visible Arbiter data root}/ollama/models
+
+secrets:
+  db_bootstrap_password:
+    file: ${ARBITER_SECRETS_DIR:?Set the protected secret directory}/db_bootstrap_password
+  db_migration_password:
+    file: ${ARBITER_SECRETS_DIR:?Set the protected secret directory}/db_migration_password
+  db_operator_password:
+    file: ${ARBITER_SECRETS_DIR:?Set the protected secret directory}/db_operator_password
+  db_runtime_password:
+    file: ${ARBITER_SECRETS_DIR:?Set the protected secret directory}/db_runtime_password
