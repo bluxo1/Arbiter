@@ -1,6 +1,6 @@
 # Arbiter
 
-Phase 1 foundation scaffold. Read [the agent workflow](docs/Agents.md) and
+Phase 1 foundation and tenant persistence. Read [the agent workflow](docs/Agents.md) and
 [project memory](docs/Memory.md) before making changes. The API exposes only health
 routes: liveness returns 200 and readiness deliberately returns 503 until the
 specified security gates exist. There is no inference or tenant API yet.
@@ -41,10 +41,11 @@ docker run --rm --network none --read-only --tmpfs /tmp arbiter-local:verificati
 docker run --rm --network none --read-only --tmpfs /tmp arbiter-local:verification mypy --cache-dir /tmp/mypy
 ```
 
-Database tests in `tests/test_database_foundation.py` require the real migrated
+Database foundation and tenant-isolation tests require the real migrated
 PostgreSQL instance, `ARBITER_TEST_DATABASE=1`, its network, and explicitly mounted
 runtime/operator/migration test credentials. Do not mount privileged test credentials
-into the API. These tests verify foundation grants, not tenant isolation.
+into the API. Tests exercise FORCE RLS, cross-tenant reads/writes/joins, composite
+relationships, immutable ownership, append-only audit grants, and pooled reuse.
 
 ```powershell
 docker run --rm --read-only --tmpfs /tmp --network arbiter_control `
@@ -55,6 +56,27 @@ docker run --rm --read-only --tmpfs /tmp --network arbiter_control `
   arbiter-local:verification python -m pytest -q -p no:cacheprovider
 ```
 
+Migration checks create and drop fresh, randomly named test databases. Run them
+separately with the bootstrap credential; they never downgrade the application DB:
+
+```powershell
+docker run --rm --read-only --tmpfs /tmp --network arbiter_control `
+  -e ARBITER_TEST_MIGRATIONS=1 `
+  --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_bootstrap_password,target=/run/secrets/db_bootstrap_password,readonly" `
+  --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_migration_password,target=/run/secrets/db_migration_password,readonly" `
+  arbiter-local:verification python -m pytest -q -p no:cacheprovider tests/test_migrations.py
+```
+
+Tenant transactions take an immutable context from a trusted service and set it
+only for that SQLAlchemy transaction. The persistence module does not authenticate
+callers and is not wired to HTTP. Read repositories add explicit tenant predicates;
+audit appends derive ownership from context and commit with their caller's work.
+Global principal data has no runtime grants. Synchronous database calls must run
+outside the event loop. The bounded runtime pool has two connections, no overflow,
+five-second acquisition/connect/statement/lock limits, and a ten-second idle
+transaction limit. Repositories reject closed transactions or changed context;
+unexpected session-wide context discards the connection.
+
 Binary dependency locks include hashes for Python 3.13 on Linux amd64. Regenerate
 with `python scripts/lock_dependencies.py` in the pinned base image and review/scan
 the result. The production image contains only runtime dependencies; the separate
@@ -62,5 +84,6 @@ verification target adds test/lint/type tools. Dependencies are installed with
 `--require-hashes`. Never use `docker compose down --volumes` as routine shutdown;
 stop with `docker compose down` to retain data.
 
-Next Phase 1 work: tenant migrations, RLS, composite relationships, transaction-local
-context, and provisioning commands. Phase 1 is not complete.
+Next Phase 1 work: local, separately credentialed tenant/member provisioning with
+transactional audit evidence, followed by the remaining phase exit checks.
+Phase 1 is not complete; readiness remains 503 and inference remains unavailable.

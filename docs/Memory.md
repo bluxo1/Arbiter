@@ -284,3 +284,94 @@ Implemented the first foundation task proposed above: typed modular FastAPI pack
 - Next bounded Phase 1 task, proposed only: tenant-owned persistence migrations and authenticated transaction-local tenant context, with restricted-role RLS, composite relationship and pooled-connection negative tests. Stop after this foundation task; do not execute that next task without a new task instruction.
 - No changes were staged, committed or pushed in this implementation session. Final service shutdown and document-hash verification are recorded below.
 - Final shutdown at 23:16 IST: only this task's API/PostgreSQL/Redis/Ollama containers were stopped; their containers, named volumes and D: data are retained. Separate Keycloak and unrelated Axiom services remained running. The seven other documentation SHA-256 hashes match the session-entry baseline. HEAD remains `67e4490`, index empty; the implementation is an uncommitted working-tree change. Restart using the README sequence before another integration check.
+
+### 2026-09-26–27 — Phase 1, task 2: tenant persistence and database isolation
+
+**Bounded task completed; Phase 1 remains incomplete.** Phase 0 acceptance for foundation work remains the user-authorized prerequisite. Session entry was clean on `main` at `7b99bca200ef9c3763d3f326e990d9cbb774d4f1` (`feat: establish Arbiter Phase 1 foundation`), which supersedes the preceding entry's uncommitted-scaffold snapshot. Read all eight documents and inspected the actual scaffold. No contradiction requiring an approved specification change was found. The seven specification/workflow documents have no diff against HEAD.
+
+#### Files changed and observed implementation
+
+- Added `migrations/versions/0002_tenant_isolation.py`: initial `tenants`, global `principals`, `memberships`, and `audit_events`, with constraints, indexes, policies and explicit grants in one migration. No later-phase records were added. The tenant root's non-null `tenant_id` is generated from its own `id`; membership/audit ownership is explicitly non-null. Root references point to the tenant identity; the tenant-owned object relationship from audit actor to membership uses the composite `(tenant_id, actor_membership_id) -> memberships(tenant_id, id)` foreign key. Principal references address the separately restricted global directory, as specified in [Design.md](Design.md).
+- Added `src/arbiter/identity/context.py` and `src/arbiter/persistence/tenant.py`: immutable UUID binding, SQLAlchemy transaction-local `set_config(..., true)`, bounded runtime-only pool, expired/context-changed transaction rejection, and rejection/discard of a connection containing unexpected session-wide context. This is a trusted-service binding value, **not identity verification**; it is not constructed by any HTTP route. Synchronous persistence is not wired into the event loop.
+- Added `src/arbiter/persistence/repositories.py`: tenant and membership reads, tenant-qualified audit/member join, and a metadata-only audit append primitive deriving ownership from context. Queries bind values; no caller can supply a tenant to an append. The append uses the existing transaction, with no separate commit. No administration, membership authorization, OIDC, API-key or other Phase 2 service was implemented.
+- Added `tests/test_tenant_isolation.py`, `tests/test_tenant_context.py`, and `tests/test_migrations.py`; updated the foundation database test to expect the new head/four tables while retaining its privilege denials. Updated `alembic.ini` with `path_separator=os` to remove the migration configuration deprecation. README now documents the scoped persistence boundary and separate privileged migration-test invocation. This entry updates `docs/Memory.md`.
+
+#### Real PostgreSQL security evidence
+
+- PostgreSQL reports **17.11 (Debian 17.11-1.pgdg12+2)**, numeric version `170011`. The existing D:-backed application database upgraded from `0001_foundation` to `0002_tenant_isolation`; a repeated upgrade and a PostgreSQL restart preserved the schema and passed the final tests.
+- All three tenant-owned tables have ENABLE and FORCE RLS, a restrictive ownership policy with both USING/WITH CHECK, and non-null ownership columns. An invoker trigger rejects changes to object/tenant identity; its search path is fixed to `pg_catalog` and runtime execution is not granted. All four tables remain migration-owned.
+- Missing context returns zero rows from tenant tables under runtime, operator **and the forced table owner**; missing/invalid/null context writes fail closed. With context A, unfiltered runtime reads and deliberately under-scoped raw joins expose only A. Forged B identifiers return no membership through A's repository.
+- A can append its own audit event; an attempted B-owned append under A fails with SQLSTATE `42501`. Scoped operator UPDATE affects zero B rows, while the positive A control updates one row before rollback. Ownership-column changes are denied by operator grants and RLS; an owner object-ID change triggers SQLSTATE `23514`.
+- Linking an A audit event to B's membership fails with `23503` on `audit_actor_membership_fk`; a nonexistent membership produces the same code/constraint. Repository actor lookup rejects both as inaccessible. SQL observation independently confirms tenant binds/predicates on reads and both join sides, and context-derived ownership on inserts, rather than relying solely on RLS.
+- The single-connection test pool reuses the **same `pg_backend_pid()`** through A, no-context, and B transactions after commit and rollback. No-context reads remain empty; B cannot retrieve A's membership. Deliberately poisoned session-wide context is rejected and its connection discarded; the next backend is different and unscoped reads are empty. Repository reuse after transaction closure or context change is rejected. Audit append rollback removes the event with its caller's transaction.
+- Runtime is NOSUPERUSER/NOBYPASSRLS/NOCREATEDB/NOCREATEROLE/NOINHERIT/NOREPLICATION, owns no table and has no role memberships. SET ROLE to operator/migration/bootstrap, role elevation, policy alteration, DISABLE/NO FORCE RLS, migrations/schema creation, migration-marker reads and TRUNCATE are denied. `SET LOCAL row_security=off` does not permit a read. Runtime has only scoped SELECT on tenant tables and INSERT on audit; it cannot administer tenants/memberships, read the global principal directory, or UPDATE/DELETE audit. Direct grant/catalog evidence is in `database-security.json`.
+- These tests prove the persistence boundary under established contexts. They do not prove caller authentication or protection against arbitrary SQL executing its own tenant settings; [Architecture.md](Architecture.md) retains that trust boundary. Future identity/operator services must establish authority before constructing context, and all administrative mutations must append audit evidence atomically.
+
+#### Checks run and actual outcomes
+
+Final verification used the rebuilt pinned Python 3.13 container, real Compose PostgreSQL, and separately mounted test credentials. Frozen-image tests below ran without a workspace source mount. Evidence directory: `D:\AI & ML\ArbiterData\phase1\tenant-isolation`.
+
+| Check | Result |
+| --- | --- |
+| `docker compose --env-file .env.example config --quiet`; `build api`; `docker build --target verification -t arbiter-local:verification .` | Passed. Existing hash-locked runtime/development dependencies and immutable base pins retained; no dependency change. |
+| `docker compose --env-file .env.example up -d --wait postgres`; explicit `--profile operations run --rm migrate`; restart PostgreSQL; repeated migration | Passed. Application database was upgraded, never downgraded. Data remains at the previously recorded D: PostgreSQL path. |
+| Foundation/context/isolation pytest invocation below, after DB restart | **54 passed, zero failures/errors/skips**. JUnit: `isolation-tests.xml`. One existing Starlette/TestClient/httpx deprecation warning remains unsuppressed. |
+| Separate privileged migration pytest invocation below | **2 passed, zero failures/errors/skips**. Each creates a fresh random-name database, tests empty or previous-supported-schema upgrade, repeated head, downgrade/re-upgrade on empty disposable tables, and full base/head round trip. Test databases were removed. JUnit: `migration-tests.xml`. |
+| Whole-checkout `ruff check --no-cache .`; `ruff format --check --no-cache .` | Passed; final format check: 34 files already formatted. |
+| Frozen-image `mypy --cache-dir /tmp/mypy`; `python -m pip check` with cache disabled | Passed: 24 source/test/migration files, no type errors; no broken requirements. |
+| PyPI OSV `POST https://api.osv.dev/v1/querybatch`, generated from `requirements-dev.lock` | 35 locked packages queried, 35 response entries validated, zero known advisories returned. `dependency-audit.json`. This is not an OS/container-library verdict. |
+| Digest-pinned Trivy 0.74.0 repository secret scan below; exact comparisons of four real DB passwords against API/PostgreSQL/Redis logs | Passed: zero detected repository secrets and no actual DB password in those service logs. Reports: `repository-secret-scan.json`, `log-secret-comparison.json`; secret values/raw logs were never displayed. |
+| `python /reports/database_security_probe.py` in the verification container with migration secret only | Passed role/grant/RLS ownership, fixed invoker function, version/head and zero remaining disposable-database checks. Script and `database-security.json` reside only in the D: evidence directory. |
+| `up -d --wait postgres redis`; explicit migration; `up -d --wait api`; actual HTTP and container inspection | Passed. Live 200, ready 503, POST chat 404. API remains UID/GID 10001, read-only, mounted with only the read-only runtime password, and off the provider network. API publishes only loopback 8000; PostgreSQL has no host port. Ollama remained stopped. `runtime-topology.json`. |
+| `git diff --check`; `git diff --cached --name-only`; seven approved document diffs | Passed whitespace check; index empty; approved specifications/workflow unchanged. HEAD unchanged; no commit/push. |
+
+Reproducible final test and scanner commands (paths contain public configuration only):
+
+```powershell
+$taskSecretRoot = 'D:\AI & ML\ArbiterData\secrets'
+$taskReportRoot = 'D:\AI & ML\ArbiterData\phase1\tenant-isolation'
+$taskDbMounts = @(
+  '--mount', "type=bind,source=$taskSecretRoot\db_runtime_password,target=/run/secrets/db_runtime_password,readonly",
+  '--mount', "type=bind,source=$taskSecretRoot\db_operator_password,target=/run/secrets/db_operator_password,readonly",
+  '--mount', "type=bind,source=$taskSecretRoot\db_migration_password,target=/run/secrets/db_migration_password,readonly"
+)
+docker run --rm --read-only --tmpfs /tmp --network arbiter_control `
+  -e ARBITER_TEST_DATABASE=1 --mount "type=bind,source=$taskReportRoot,target=/reports" `
+  @taskDbMounts arbiter-local:verification python -m pytest -q -p no:cacheprovider `
+  tests/test_foundation.py tests/test_database_foundation.py tests/test_tenant_context.py `
+  tests/test_tenant_isolation.py --junitxml=/reports/isolation-tests.xml
+docker run --rm --read-only --tmpfs /tmp --network arbiter_control `
+  -e ARBITER_TEST_MIGRATIONS=1 --mount "type=bind,source=$taskReportRoot,target=/reports" `
+  --mount "type=bind,source=$taskSecretRoot\db_bootstrap_password,target=/run/secrets/db_bootstrap_password,readonly" `
+  --mount "type=bind,source=$taskSecretRoot\db_migration_password,target=/run/secrets/db_migration_password,readonly" `
+  arbiter-local:verification python -m pytest -q -p no:cacheprovider tests/test_migrations.py `
+  --junitxml=/reports/migration-tests.xml
+docker run --rm --network none --read-only --tmpfs /tmp `
+  --mount 'type=bind,source=E:\Arbiter,target=/workspace,readonly' -w /workspace `
+  -e PYTHONPATH=/workspace/src arbiter-local:verification ruff check --no-cache .
+docker run --rm --network none --read-only --tmpfs /tmp `
+  --mount 'type=bind,source=E:\Arbiter,target=/workspace,readonly' -w /workspace `
+  -e PYTHONPATH=/workspace/src arbiter-local:verification ruff format --check --no-cache .
+docker run --rm --network none --read-only --tmpfs /tmp `
+  arbiter-local:verification mypy --cache-dir /tmp/mypy
+docker run --rm --network none --read-only --tmpfs /tmp -e PIP_NO_CACHE_DIR=1 `
+  arbiter-local:verification python -m pip check
+docker run --rm --network none --memory 1g --cpus 2 `
+  --mount 'type=bind,source=E:\Arbiter,target=/workspace,readonly' `
+  --mount "type=bind,source=$taskReportRoot,target=/reports" `
+  --mount 'type=bind,source=D:\AI & ML\ArbiterData\tmp,target=/tmp' `
+  aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 `
+  fs --scanners secret --skip-dirs /workspace/.git --timeout 3m --exit-code 1 `
+  --no-progress --format json --output /reports/repository-secret-scan.json /workspace
+```
+
+#### Corrected observations, operational handoff and remaining gates
+
+- Initial integration run: 47 passed and one test failed because it expected NOT NULL SQLSTATE `23502`; the actual null-ownership insert is rejected earlier by RLS with `42501`. Corrected that expectation, retaining the denial and independent NOT NULL catalog assertions. Initial style/type findings were fixed without blanket ignores. A patch context mismatch after formatting was corrected before rerunning checks.
+- Initial migration transitions passed, but both teardowns errored on the unsupported `DROP DATABASE ... WITH (FORCE false)` syntax. Replaced it with ordinary non-FORCE DROP. Independently verified ownership and emptiness of exactly the two newly created test databases before removing them; the successful reruns also completed cleanup. No unrelated database was dropped or downgraded. An initial standalone catalog probe assumed Debian suffix `+1`; actual runtime suffix is `+2`. Its assertion failed, then version verification used the numeric version and recorded the full observed string. None of these initial failures is counted as a pass.
+- Final builds observed via Docker inspection: runtime `sha256:6b5af84ab04edbc054e37067557b76b46e70b26f3405011b0832ff86e146b1c8`; verification `sha256:e16ff0882fadced1cda67ab3a6299849a02be9c6a878d35d8ed8407a44417451`. These are local builds from an uncommitted working tree, not published release artifacts.
+- At approximately **00:10 IST on 2026-09-27**, stopped only this task's API/Redis/PostgreSQL services with `docker compose --env-file .env.example stop api redis postgres`. Containers, named volumes, credentials and D: state are retained. Ollama was never started. Separate Keycloak and unrelated Axiom services remain running. No model download/inference, external account, secret regeneration or unrelated storage relocation occurred.
+- All bounded-task persistence criteria have current real-PostgreSQL evidence. **Phase 1 is not complete:** local tenant/member provisioning commands and transactional administrative audit are still missing; a final whole-phase clean-stack/operational exit review remains to be performed. Readiness stays fail-closed rather than claiming unimplemented identity/enforcement gates. Phase 2+ remains unstarted.
+- Existing release blocker remains: the prior OS/container-library vulnerability scan timed out and has no clean-image verdict. Assigned to the maintainer before release, as previously recorded. The current Python/secret scans do not resolve it; no repeat of the large Ollama image audit was required for this database-only task.
+- **Next bounded Phase 1 task, proposed only:** separately credentialed local tenant/member provisioning commands using the scoped transaction/repository boundary and atomic operator audit events; prove successful provisioning, rollback, duplicate handling and denied privilege/tenant reassignment with real PostgreSQL. Keep OIDC/API keys/governance/inference unavailable. Do not execute this next task without a new instruction.
+- No files were staged, committed or pushed. Restart PostgreSQL using the README/Compose commands before another integration run. Stop after this task.
