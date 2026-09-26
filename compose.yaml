@@ -119,6 +119,13 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
 
+  diagnostics:
+    <<: *app
+    profiles: [operations]
+    command: [python, -m, arbiter.operations.diagnostics]
+    secrets: [db_runtime_password]
+    # No depends_on: operators must be able to diagnose unavailable dependencies.
+
 networks:
   edge: {}
   control: {internal: true}

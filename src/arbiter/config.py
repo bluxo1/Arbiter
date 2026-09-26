@@ -10,6 +10,13 @@ from sqlalchemy import URL
 DatabaseRole = Literal["bootstrap", "migration", "operator", "runtime"]
 
 
+class RedisSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="ARBITER_REDIS_", frozen=True)
+
+    host: str = "redis"
+    port: int = Field(default=6379, ge=1, le=65535)
+
+
 class DatabaseSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ARBITER_DB_", frozen=True)
 

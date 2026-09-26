@@ -461,3 +461,119 @@ The secret scan uses the task 2 recorded Trivy digest/flags and read-only reposi
 - **Remaining Phase 1 work:** foundation readiness/diagnostic checks and a final whole-phase clean, isolated Compose bootstrap/migrate/start/restart/secret/port exit review at the current implementation state. The bounded provisioning task does not supply that complete review, so Phase 1 is not declared complete. Full readiness is still deliberately closed for unimplemented required identity/enforcement/recovery gates; no Phase 2 work is authorized here.
 - Existing release blocker remains the prior incomplete OS/container-library vulnerability scan; maintainer must resolve it before release. Current Python/secret scans do not supply a clean-container verdict. No human decision blocks this completed task.
 - **Next bounded Phase 1 task, proposed only:** foundation readiness/operator diagnostics and repeatable isolated clean-stack exit verification, preserving readiness 503 where later mandatory gates are absent and keeping all inference unavailable. Do not implement it without another instruction. No files were staged, committed or pushed. Stop after this task.
+
+### 2026-09-27 — Phase 1, task 4: foundation closure
+
+**Phase 1 exit criteria pass at this working-tree snapshot.** This supersedes task 3's incomplete-phase assessment, not its historical evidence. Entry was clean on `main` at `abfb76a260f77f3097b9363bffdbbc970d37facf` (`feat: add operator provisioning and audit controls`). Read all eight documents and current implementation; Phase 0 acceptance remains the prerequisite. No contradiction requiring a specification change was found. The seven approved specification/workflow documents remain unchanged. No Phase 2 implementation, inference enablement, commit or push occurred.
+
+#### Changes and boundaries
+
+- Added `src/arbiter/operations/diagnostics.py`: local read-only diagnostics using only the runtime credential, catalog checks for runtime authority/ownership/non-null tenant columns/FORCE RLS/policy presence, and bounded Redis PING/INFO checks for the pinned version, primary role, loading, AOF write/rewrite status, memory ceiling and no-eviction policy. PostgreSQL uses the existing finite pool/connect/statement limits. Redis has a two-second socket limit, four-second reply deadline, 128-byte header limit and 64-KiB bulk limit. Replies/errors never become public HTTP diagnostics or raw error messages. These checks do not certify the entire schema, validate identity, implement a rate limiter/recovery epoch, or contact a provider.
+- Updated `src/arbiter/config.py` with deployment-only Redis host/validated port settings, and `compose.yaml` with an operations-profile diagnostics command mounting only the runtime password. It has no healthy-dependency prerequisite, so it can report outages. No dependency lock, image pin, schema, role or grant changed.
+- Added `tests/test_diagnostics.py`; updated `tests/test_database_foundation.py` to attempt real Alembic upgrades using runtime, including an explicit visible-schema attempt. Updated `README.md` with the diagnostic command, exit semantics and isolated-stack procedure. Updated this memory entry. API handlers/startup remain unchanged: live 200, ready 503, no inference or operator HTTP routes.
+- Diagnostic exit 0 means **foundation checks passed**, never application readiness. It always reports `ready=false` and fixed names for unimplemented identity/enforcement/recovery/model-readiness gates. Public readiness remains minimal 503 even when dependencies recover, as required by Architecture.md/Design.md. Redis PING/AOF health cannot replace the later recovery barrier.
+
+#### Fresh environment, storage and real operational evidence
+
+Evidence root: `D:\AI & ML\ArbiterData\phase1\closure`. Fresh application credentials/storage were created on the existing validated Windows/WSL2/Docker host; this is not a claim of testing a freshly installed OS or Docker. Docker Linux Engine **29.8.0**, Compose **v5.5.1**, pinned PostgreSQL **17.11**, Redis **7.2.16**, Python **3.13.15** and Ollama **0.34.4** were used. Preparation began at **01:42 IST**; shutdown/recreation checks at approximately **01:49–01:51 IST**. Tool output and the following external artifacts supply the evidence:
+
+| Check | Observed result / artifact |
+| --- | --- |
+| Fresh-root preparation, before Compose startup | New `ArbiterData\postgres` and `redis` directories had zero files. Four newly generated independent secrets; protected directory with exactly three allowed ACL entries. `fresh-state.json`. |
+| Explicit PostgreSQL/Redis start, bootstrap, empty-schema migration, API/Ollama start | Passed under project `arbiter-phase1-closure`. Diagnostics exited 1 with PostgreSQL false/Redis true both before role bootstrap and after bootstrap before migrations. Following migration, both foundation checks passed, exit 0; application readiness remained false. Missing schema was not treated as ready. |
+| `closure-checks.ps1`: actual diagnostics and wire health during outages | PostgreSQL stop and Redis stop each made the corresponding check false, exit 1. A temporary Redis `allkeys-lru` policy also failed diagnostics despite successful PING; restored `noeviction` in `finally`. Restart restored foundation checks, exit 0. Live stayed 200/minimal `ok`; ready stayed 503/minimal `not_ready` throughout. Recorded commands took approximately 1.7–6.5 seconds including Python startup/Docker exec, not an HTTP latency promise. `readiness-outages.json`. |
+| Clean stop of API/PostgreSQL/Redis/Ollama, `down` without volume removal, and recreation | All four stopped with exit 0 and `OOMKilled=false`. Recreated dependencies, repeated explicit bootstrap/head migration, and restarted API/Ollama successfully. `shutdown.json`. |
+| Local CLI tenant/member/suspension fixture plus scoped runtime reads before/after recreation | Same suspended tenant, active admin membership and same three audit event IDs/actions persisted. Redis AOF sentinel also persisted. Fixture is synthetic, confined to this new cluster; no issuer account was created. `retention-before.json`, `retention-after.json`, `retention_probe.py`. |
+| Repeated secret preparation and ACL/value comparisons | Four distinct 64-character secrets retained byte-for-byte; each file reader belongs to current user/SYSTEM/Administrators. Values/hashes not published. `secret-provisioning.json`. |
+| Actual container, port, mount and network inspection | Only API publishes `127.0.0.1:18000 -> 8000`; PG/Redis/Ollama and operation containers publish no host ports. All app commands use UID/GID 10001, read-only roots, dropped capabilities and no-new-privileges. API/diagnostics receive runtime only; operator receives operator only; migrate receives migration only; explicit bootstrap receives all four. Secret mounts are read-only. Control/provider networks are internal; API is absent from provider network. `runtime-topology.json`, `networks.json`, `topology-checks.ps1`. |
+| Actual named-volume inspection | PostgreSQL: `D:\AI & ML\ArbiterData\phase1\closure\ArbiterData\postgres`; Redis: same root's `redis`; secret files: same root's `secrets`. Separate named volumes reuse **only** `D:\AI & ML\ArbiterData\ollama\models` for the provider. Linux bind devices use `/run/desktop/mnt/host/d/AI & ML/ArbiterData/...`. `storage-volumes.json`. Existing default application storage, separate Keycloak, unrelated Axiom services and shared E: Docker/WSL storage were untouched. |
+| Provider metadata only and HTTP surface checks | Existing approved manifest `0edcdef34593eac1aa2be9c7d06c432dcf81945adca5eca2f27662c18f168ba0` visible; zero loaded models. Only `/api/tags` and `/api/ps` were called; no pull/generation/prewarm. GET/POST diagnostics, docs, OpenAPI, chat and operator paths returned 404. `provider-metadata.json`, topology-check script. |
+
+#### Exact verification and security evidence
+
+The final tests ran after stack recreation in a rebuilt frozen verification image, without a workspace source mount. The normal gate mounts runtime/operator/migration files only; the dedicated migration invocation mounts bootstrap/migration only. PostgreSQL isolation was real, not mocked.
+
+```powershell
+$taskEvidence = 'D:\AI & ML\ArbiterData\phase1\closure'
+$taskSecrets = "$taskEvidence\ArbiterData\secrets"
+$taskCompose = @('--env-file', "$taskEvidence\closure.env", '-f', 'compose.yaml',
+  '-f', "$taskEvidence\models.override.yaml", '-p', 'arbiter-phase1-closure')
+.\scripts\prepare-local.ps1 -DataRoot "$taskEvidence\ArbiterData"
+docker compose @taskCompose config --quiet
+docker compose @taskCompose build api
+docker build --target verification -t arbiter-local:verification .
+docker compose @taskCompose up -d --wait --wait-timeout 120 postgres redis
+docker compose @taskCompose --profile operations run --rm --no-deps diagnostics
+docker compose @taskCompose --profile operations run --rm bootstrap
+docker compose @taskCompose --profile operations run --rm --no-deps diagnostics
+docker compose @taskCompose --profile operations run --rm migrate
+docker compose @taskCompose up -d --wait --wait-timeout 180 api ollama
+# The two pre-migration diagnostic invocations above intentionally exit 1.
+& "$taskEvidence\closure-checks.ps1"
+$taskMounts = @(
+  '--mount', "type=bind,source=$taskSecrets\db_runtime_password,target=/run/secrets/db_runtime_password,readonly",
+  '--mount', "type=bind,source=$taskSecrets\db_operator_password,target=/run/secrets/db_operator_password,readonly",
+  '--mount', "type=bind,source=$taskSecrets\db_migration_password,target=/run/secrets/db_migration_password,readonly")
+docker run --rm --read-only --tmpfs /tmp --network arbiter-phase1-closure_control `
+  -e ARBITER_TEST_DATABASE=1 -e ARBITER_TEST_REDIS=1 `
+  --mount "type=bind,source=$taskEvidence,target=/reports" @taskMounts `
+  arbiter-local:verification python -m pytest -q -p no:cacheprovider `
+  --ignore=tests/test_migrations.py --junitxml=/reports/phase1-tests.xml
+docker run --rm --read-only --tmpfs /tmp --network arbiter-phase1-closure_control `
+  -e ARBITER_TEST_MIGRATIONS=1 --mount "type=bind,source=$taskEvidence,target=/reports" `
+  --mount "type=bind,source=$taskSecrets\db_bootstrap_password,target=/run/secrets/db_bootstrap_password,readonly" `
+  --mount "type=bind,source=$taskSecrets\db_migration_password,target=/run/secrets/db_migration_password,readonly" `
+  arbiter-local:verification python -m pytest -q -p no:cacheprovider tests/test_migrations.py `
+  --junitxml=/reports/migration-tests.xml
+& "$taskEvidence\topology-checks.ps1"
+docker run --rm --network none --read-only --tmpfs /tmp `
+  --mount 'type=bind,source=E:\Arbiter,target=/workspace,readonly' -w /workspace `
+  -e PYTHONPATH=/workspace/src arbiter-local:verification ruff check --no-cache .
+docker run --rm --network none --read-only --tmpfs /tmp `
+  --mount 'type=bind,source=E:\Arbiter,target=/workspace,readonly' -w /workspace `
+  -e PYTHONPATH=/workspace/src arbiter-local:verification ruff format --check --no-cache .
+docker run --rm --network none --read-only --tmpfs /tmp `
+  arbiter-local:verification mypy --cache-dir /tmp/mypy
+docker run --rm --network none --read-only --tmpfs /tmp -e PIP_NO_CACHE_DIR=1 `
+  arbiter-local:verification python -m pip check
+```
+
+| Final check | Actual result |
+| --- | --- |
+| Full foundation/isolation/provisioning/diagnostics gate | **101 passed**, zero failures/errors/skips, 15.76 seconds. `phase1-tests.xml`. Existing TestClient/httpx deprecation warning remains unsuppressed. |
+| Separate disposable migration gate | **4 passed**, zero failures/errors/skips, 32.07 seconds. Empty, `0001_foundation` and `0002_tenant_isolation` upgrades, repeat head, empty-database round trips, and seeded previous-schema tenant/audit preservation passed. Test databases removed; application DB never downgraded. `migration-tests.xml`. |
+| Runtime actual Alembic attempts and RLS negative gate | Default migration attempt denied with `3F000` because no accessible default schema exists; explicit `arbiter` search path attempt denied with `42501` on version-table creation. Existing DDL/version-marker/role-elevation denials passed. Missing context, A/B reads/writes/joins, mixed-tenant FK, FORCE RLS including owner, row-security-off denial and same-backend pooled commit/rollback/poisoned-context tests all passed. |
+| Catalog probe with migration credential only | Head remains `0003_operator_audit`, four migration-owned tables, three ENABLE/FORCE tenant tables, runtime/operator/migration NOSUPERUSER/NOBYPASSRLS/NOINHERIT with no role memberships. Runtime has tenant SELECT/audit INSERT only, no administration, global principal reads, UPDATE/DELETE/TRUNCATE. Zero leftover disposable databases. `database-security.json`, `security_catalog.py`. |
+| Whole-checkout Ruff lint/format, frozen strict mypy and pip check | Passed: 41 Python files formatted; 31 typed source/test/migration files; no broken requirements. |
+| OSV querybatch for the unchanged development lock | 35 complete PyPI results, zero known advisories. `dependency-audit.json`. This does not certify OS/container libraries. |
+| Actual four DB passwords compared against service logs | Zero matches across recreated API/PostgreSQL/Redis/Ollama logs; values and raw logs suppressed. `log-secret-comparison.json`. |
+
+Local tested image references: runtime `sha256:1942e3d7ee064405354b33d6d7ced248cdc1fbd2c5464d83006e37f04e436b74`; final verification `sha256:87883c1d37831b2a1e09a2df4f7c9801073a633b8d89aa9f7c1ca9da8aa4afc1`. These identify local builds from this uncommitted working tree, not a published or deployed release.
+
+#### Phase exit assessment and handoff
+
+Every exit criterion in [Phases.md, Phase 1](Phases.md) has current evidence: clean migration/start, denied runtime migration/RLS bypass, denied context-free data access, cross-tenant reads/writes/joins, rejected mixed relationships, clean pool reuse, empty/previous migrations, and inspected ports/secrets. Foundation deliverables including local tenant/member commands and health/diagnostics are present and tested. **No Phase 1 work remains.** Application/inference readiness is intentionally not a Phase 1 pass claim; later required gates remain absent.
+
+- Corrections during validation: initial unit typing check required four explicit scalar annotations. Initial full gate was 99 passed/one failed because its test assumed only `42501`; actual default runtime denial was `3F000`. Added the separate explicit-schema denial without broadening privileges. The first OSV summary incorrectly counted PowerShell null arrays as vulnerabilities; inspection found 35 empty results and corrected the count to zero. An unsupported `compose create --no-deps` inspection flag was replaced with verified `--no-recreate`. These initial errors are not passes.
+- Remaining release evidence: the historical incomplete container OS/library vulnerability scan remains assigned to the maintainer before Phase 5 release. Current Python/secret checks do not resolve it. No unresolved Phase 1 blocker or human decision remains.
+- Next bounded task, proposed only: Phase 2 OIDC JWT verification against the selected issuer with strict issuer/audience/RS256/JWKS/TLS and negative-token tests, keeping inference unavailable. Requires another user instruction; not implemented here.
+- Final repository secret scan, source snapshot and retained-state shutdown evidence are recorded below. Stop after this closure pass; do not commit/push or begin Phase 2.
+
+#### Final evidence and stopped-state handoff (01:58 IST)
+
+- Digest-pinned Trivy **0.74.0** repository secret scan exited 0 with **zero findings**. It included the implementation and memory entry, ran with networking disabled/read-only repository, and excluded `.git`. Report: `repository-secret-scan.json`. Exact command:
+
+```powershell
+docker run --rm --network none --read-only --tmpfs /tmp --memory 1g --cpus 2 `
+  --mount 'type=bind,source=E:\Arbiter,target=/workspace,readonly' `
+  --mount "type=bind,source=$taskEvidence,target=/reports" `
+  --mount "type=bind,source=$taskEvidence\ArbiterData\tmp,target=/scratch" `
+  aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 `
+  fs --cache-dir /scratch/trivy --scanners secret --skip-dirs /workspace/.git `
+  --timeout 3m --exit-code 1 --no-progress --format json `
+  --output /reports/repository-secret-scan.json /workspace
+```
+
+- `source_snapshot.py` in the frozen verification image compared all **31 Python files** under `src/tests/migrations` byte-for-byte against the read-only workspace; all matched. File SHA-256 evidence is in `source-snapshot.json`. JUnit reinspection confirms 101+4 tests, zero failures/errors/skips. Reviewed the complete bounded diff; final `git diff --check` and seven approved-document diffs pass, index empty, HEAD unchanged.
+- Final `docker compose @taskCompose stop api ollama redis postgres` again produced exit 0/no OOM for all four (`final-shutdown.json`). `docker compose @taskCompose --profile operations down` removed only the isolated project's containers/networks, retaining all three named volumes, D: data, synthetic retention fixture and protected credentials. No volume removal or unrelated data deletion occurred. At **01:57:52 IST**, only the preexisting separate Keycloak and two unrelated Axiom services were running; the new API port was no longer published. Default Arbiter containers/data remain untouched.
+- The closure evidence scripts, public `closure.env`, model-volume override, reports and scratch remain outside Git on D:. To reproduce with retained storage, use `$taskCompose` above and the explicit startup sequence; an actually empty-stack repeat requires another new isolated data/secret root, not deleting this retained cluster. Later validation must verify current state rather than treating this historical run as application readiness. Phase 1 passes; stop here.

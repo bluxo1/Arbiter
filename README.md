@@ -117,5 +117,29 @@ an individually authenticated human. Runtime cannot insert operator-labelled
 audit rows, invoke operator services, or change tenant/member state. No command
 adds an HTTP route or enables inference.
 
-Next Phase 1 work: the remaining foundation readiness/operational exit review.
-Phase 1 is not complete; readiness remains 503 and inference remains unavailable.
+Local foundation diagnostics use only the runtime secret and need no healthy
+dependency prerequisite:
+
+```powershell
+docker compose --profile operations run --rm --no-deps diagnostics
+```
+
+Exit 0 means the PostgreSQL runtime role/schema checks and bounded Redis
+PING/INFO configuration/persistence checks passed; exit 1 means a foundation
+check failed. Output contains only fixed check names and booleans. These checks
+do not prove the complete schema or replace migration/isolation tests. They never
+read tenant records or mutate Redis. Dependency details have no HTTP route.
+`foundation_ready=true` is distinct from application readiness: output always
+reports `ready=false` while identity, enforcement, recovery and model readiness
+gates remain unimplemented. Redis PING/AOF health does not establish limiter
+state or its future restart barrier. `/health/live` remains responsive during
+dependency outages; `/health/ready` remains a minimal 503 without network IO.
+
+For an isolated clean-stack check, use a separate Compose project name, fresh
+D: PostgreSQL/Redis directories and separate protected secret files. Reuse the
+approved model cache through a volume override; do not duplicate model bytes.
+Follow the same explicit bootstrap/migrate/start sequence above, then run the
+real isolation and disposable migration suites. Inspect actual mounts, networks
+and published ports. Stop/recreate with `down` and `up`, without `--volumes`, to
+verify retained data and credentials. See project memory for the actual closure
+evidence and Phase 1 assessment. Inference remains unavailable.
