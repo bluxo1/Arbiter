@@ -88,7 +88,7 @@ def migrate_to(engine: Engine, revision: str, *, downgrade: bool = False) -> Non
             command.upgrade(config, revision)
 
 
-@pytest.mark.parametrize("previous", [None, "0001_foundation"])
+@pytest.mark.parametrize("previous", [None, "0001_foundation", "0002_tenant_isolation"])
 def test_migration_empty_and_previous_then_repeat_and_round_trip(
     disposable_database: Engine, previous: str | None
 ) -> None:
@@ -96,18 +96,15 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
     if previous is not None:
         migrate_to(engine, previous)
         with engine.begin() as connection:
-            assert (
-                connection.execute(
-                    text("SELECT count(*) FROM pg_tables WHERE schemaname='arbiter'")
-                ).scalar_one()
-                == 0
-            )
+            assert connection.execute(
+                text("SELECT count(*) FROM pg_tables WHERE schemaname='arbiter'")
+            ).scalar_one() == (4 if previous == "0002_tenant_isolation" else 0)
     migrate_to(engine, "head")
     migrate_to(engine, "head")
     with engine.begin() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
-            == "0002_tenant_isolation"
+            == "0003_operator_audit"
         )
         assert (
             connection.execute(
@@ -124,6 +121,16 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
             ).scalar_one()
             == 3
         )
+        assert (
+            connection.execute(
+                text("""
+            SELECT count(*) FROM pg_policies WHERE schemaname='arbiter'
+                AND policyname='runtime_audit_actor' AND permissive='RESTRICTIVE'
+                AND cmd='INSERT' AND with_check IS NOT NULL
+        """)
+            ).scalar_one()
+            == 1
+        )
     # Safe only because this database is disposable and all tenant tables are empty.
     migrate_to(engine, "0001_foundation", downgrade=True)
     migrate_to(engine, "head")
@@ -136,3 +143,44 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
             == 0
         )
     migrate_to(engine, "head")
+
+
+def test_operator_audit_upgrade_preserves_existing_tenant_and_audit(
+    disposable_database: Engine,
+) -> None:
+    engine = disposable_database
+    tenant, event = uuid4(), uuid4()
+    migrate_to(engine, "0002_tenant_isolation")
+    with engine.begin() as connection:
+        connection.execute(
+            text("SELECT set_config('arbiter.tenant_id', :tenant, true)"), {"tenant": str(tenant)}
+        )
+        connection.execute(
+            text("INSERT INTO arbiter.tenants (id,status) VALUES (:tenant,'suspended')"),
+            {"tenant": tenant},
+        )
+        connection.execute(
+            text("""
+            INSERT INTO arbiter.audit_events
+                (id,tenant_id,actor_type,actor_reference,action,target_id,policy_revision,outcome)
+            VALUES (:event,:tenant,'operator','arbiter_operator','tenant_suspended',
+                    :tenant,1,'succeeded')
+        """),
+            {"event": event, "tenant": tenant},
+        )
+    migrate_to(engine, "head")
+    with engine.begin() as connection:
+        connection.execute(
+            text("SELECT set_config('arbiter.tenant_id', :tenant, true)"), {"tenant": str(tenant)}
+        )
+        assert connection.execute(
+            text("SELECT id,status FROM arbiter.tenants WHERE tenant_id=:tenant"),
+            {"tenant": tenant},
+        ).one() == (tenant, "suspended")
+        assert connection.execute(
+            text("""
+            SELECT id,actor_type,action,target_id FROM arbiter.audit_events
+            WHERE tenant_id=:tenant
+        """),
+            {"tenant": tenant},
+        ).one() == (event, "operator", "tenant_suspended", tenant)

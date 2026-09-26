@@ -84,6 +84,38 @@ verification target adds test/lint/type tools. Dependencies are installed with
 `--require-hashes`. Never use `docker compose down --volumes` as routine shutdown;
 stop with `docker compose down` to retain data.
 
-Next Phase 1 work: local, separately credentialed tenant/member provisioning with
-transactional audit evidence, followed by the remaining phase exit checks.
+Local operator provisioning uses only the separate operator secret, through the
+operations profile. Start PostgreSQL and apply migrations first; API, Redis and
+Ollama are unnecessary for these commands:
+
+```powershell
+docker compose --profile operations run --rm operator create-tenant
+docker compose --profile operations run --rm operator create-member `
+  --tenant '<tenant UUID returned above>' `
+  --issuer 'https://localhost:18443/realms/arbiter' `
+  --subject '<existing issuer subject>' --role member
+docker compose --profile operations run --rm operator set-tenant-status `
+  --tenant '<tenant UUID returned above>' --status suspended
+```
+
+Replace the placeholders with public identifiers obtained through a trusted local
+operator process. Membership input records the exact issuer/subject binding; it
+does not verify JWTs, contact OIDC, or create an issuer account. Roles are `member`
+and `admin`. Status is `active` or `suspended`; setting the current status returns
+`changed=false` with no new mutation/audit. The operator can prepare memberships
+while a tenant is suspended. Status changes leave the allocation policy revision
+unchanged and lock the tenant row before changing status or creating a member.
+
+Successful mutations return generated object/audit/correlation IDs after commit.
+Every mutation and its operator audit event share one transaction; audit failure
+rolls back the complete operation, including a newly created global principal.
+Duplicate membership attempts fail without changing the existing role or writing
+a success event. Every `create-tenant` invocation creates a new UUID tenant; there
+is no caller-chosen tenant ID, name-based uniqueness, or automatic retry. Operator
+audit identifies the authenticated shared database role `arbiter_operator`, not
+an individually authenticated human. Runtime cannot insert operator-labelled
+audit rows, invoke operator services, or change tenant/member state. No command
+adds an HTTP route or enables inference.
+
+Next Phase 1 work: the remaining foundation readiness/operational exit review.
 Phase 1 is not complete; readiness remains 503 and inference remains unavailable.

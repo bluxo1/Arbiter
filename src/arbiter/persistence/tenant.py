@@ -1,7 +1,8 @@
 """Scoped transactions for trusted services; this module does not authenticate callers.
 
 Never construct TenantContext from an unchecked HTTP selector. Identity verification
-and local operator provisioning are subsequent tasks. Synchronous persistence must
+is a subsequent task; local operators authenticate separately before binding scope.
+Synchronous persistence must
 run outside the FastAPI event loop; no HTTP route uses it in this phase.
 """
 
@@ -64,15 +65,25 @@ def tenant_transaction(engine: Engine, context: TenantContext) -> Iterator[Tenan
         raise TypeError("trusted tenant context is required")
     with engine.connect() as connection:
         with connection.begin() as transaction:
-            # A session-level setting is an invariant violation, not a fallback authority.
-            inherited: str | None = connection.execute(
-                text("SELECT NULLIF(current_setting('arbiter.tenant_id', true), '')")
-            ).scalar_one()
-            if inherited is not None:
-                connection.invalidate()
-                raise RuntimeError("unexpected session tenant context")
-            connection.execute(
-                text("SELECT set_config('arbiter.tenant_id', :tenant_id, true)"),
-                {"tenant_id": str(context.tenant_id)},
-            )
-            yield TenantTransaction(connection, transaction, context)
+            yield bind_tenant_transaction(connection, transaction, context)
+
+
+def bind_tenant_transaction(
+    connection: Connection, transaction: Transaction, context: TenantContext
+) -> TenantTransaction:
+    """Bind an already-open transaction after a trusted service establishes authority."""
+    if not isinstance(context, TenantContext):
+        raise TypeError("trusted tenant context is required")
+    if not transaction.is_active or connection.get_transaction() is not transaction:
+        raise RuntimeError("active tenant transaction is required")
+    inherited: str | None = connection.execute(
+        text("SELECT NULLIF(current_setting('arbiter.tenant_id', true), '')")
+    ).scalar_one()
+    if inherited is not None:
+        connection.invalidate()
+        raise RuntimeError("unexpected session tenant context")
+    connection.execute(
+        text("SELECT set_config('arbiter.tenant_id', :tenant_id, true)"),
+        {"tenant_id": str(context.tenant_id)},
+    )
+    return TenantTransaction(connection, transaction, context)

@@ -110,6 +110,15 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
 
+  operator:
+    <<: *app
+    profiles: [operations]
+    entrypoint: [python, -m, arbiter.operations.provision]
+    command: [--help]
+    secrets: [db_operator_password]
+    depends_on:
+      postgres: {condition: service_healthy}
+
 networks:
   edge: {}
   control: {internal: true}

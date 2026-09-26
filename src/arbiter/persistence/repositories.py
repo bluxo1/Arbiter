@@ -1,7 +1,7 @@
 """Tenant repositories: explicit tenant predicates in addition to database RLS.
 
 No administration/provisioning service or HTTP identity resolver is provided here.
-Audit-producing administration will be added in its own bounded Phase 1 task.
+Local administration uses the separate operator repositories and command service.
 """
 
 from dataclasses import dataclass
