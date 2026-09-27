@@ -1,9 +1,8 @@
 """Scoped transactions for trusted services; this module does not authenticate callers.
 
-Never construct TenantContext from an unchecked HTTP selector. Identity verification
-is a subsequent task; local operators authenticate separately before binding scope.
-Synchronous persistence must
-run outside the FastAPI event loop; no HTTP route uses it in this phase.
+Never construct TenantContext from an unchecked HTTP selector. Identity services
+verify identity and active membership first; local operators authenticate separately.
+Synchronous persistence must run outside the FastAPI event loop.
 """
 
 from collections.abc import Iterator

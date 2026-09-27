@@ -1,9 +1,10 @@
 # Arbiter
 
-Phase 1 foundation and tenant persistence. Read [the agent workflow](docs/Agents.md) and
-[project memory](docs/Memory.md) before making changes. The API exposes only health
-routes: liveness returns 200 and readiness deliberately returns 503 until the
-specified security gates exist. There is no inference or tenant API yet.
+Phase 1 foundation and bounded Phase 2 identity/audit access. Read
+[the agent workflow](docs/Agents.md) and [project memory](docs/Memory.md) before changes.
+The API exposes health and authenticated tenant audit reads. Liveness returns 200;
+readiness deliberately returns 503 until all required security gates exist.
+Inference and API keys remain unavailable; Phase 2 is incomplete.
 
 On the validated Windows/WSL2 host, prepare private files on D: and load public paths:
 
@@ -21,7 +22,8 @@ docker compose up -d --wait api ollama
 
 Secret preparation retains existing values. Bootstrap is an explicit, privileged
 local command; it is not part of API startup. Migrations use their own credential.
-The API receives only its runtime password file. Keep secret values outside Git;
+The API receives only its runtime password and separate audit cursor key files.
+Keep secret values outside Git;
 `.env.example` contains public paths only. Local Compose secrets are file mounts,
 so protect their host directory as well as restricting per-service mounts.
 
@@ -69,7 +71,8 @@ docker run --rm --read-only --tmpfs /tmp --network arbiter_control `
 
 Tenant transactions take an immutable context from a trusted service and set it
 only for that SQLAlchemy transaction. The persistence module does not authenticate
-callers and is not wired to HTTP. Read repositories add explicit tenant predicates;
+callers; the authenticated audit service establishes authority before access.
+Read repositories add explicit tenant predicates;
 audit appends derive ownership from context and commit with their caller's work.
 Global principal data has no runtime grants. Synchronous database calls must run
 outside the event loop. The bounded runtime pool has two connections, no overflow,
@@ -144,9 +147,8 @@ and published ports. Stop/recreate with `down` and `up`, without `--volumes`, to
 verify retained data and credentials. See project memory for the actual closure
 evidence and Phase 1 assessment. Inference remains unavailable.
 
-The first Phase 2 task supplies OIDC verification and membership authorization as
-application services. Management HTTP routes are still unavailable; this task
-does not implement API keys, administration endpoints, admission or inference.
+OIDC verification and membership authorization back the audit-list endpoint.
+Key management, other metadata endpoints, admission and inference are unavailable.
 `OidcVerifier` is an async context manager with bounded HTTPS JWKS retrieval,
 RS256-only signature checks, exact issuer/audience checks, required `exp/iss/sub/aud`
 and validation of optional `nbf/iat`. Clock skew is configurable from 0 to 60
@@ -172,7 +174,7 @@ do not establish membership or permission; admin requirements use the database
 membership role. Each call rechecks membership and tenant status; no successful
 authorization cache exists. No function constructs context from an unchecked
 HTTP header or body. The separate Bearer parser rejects duplicate/mixed credential
-headers, and is ready for future management endpoints.
+headers, and is used by the audit endpoint.
 
 Before applying revision `0004_identity_lookup`, repeat the explicit bootstrap
 command. It provisions a dedicated non-login, non-superuser, NOBYPASSRLS lookup
@@ -187,3 +189,32 @@ ordinary FORCE RLS protections. Arbitrary SQL executing forged identity paramete
 is outside the documented application trust boundary. Later dispatch must recheck
 authority and serialize security mutations; this task supplies no dispatch-race
 or complete Phase 2 claim.
+
+`GET /v1/tenants/{tenant_id}/audit` accepts a member/admin OIDC Bearer token.
+The tenant path selects an active membership; headers and JWT tenant/role claims
+cannot grant access. Authentication and membership precede cursor validation and
+repository reads. Unauthorized and nonexistent tenants both return generic 404;
+invalid credentials return 401; invalid list parameters return sanitized 422;
+unavailable identity/database dependencies return 503. Responses include
+`Cache-Control: no-store`; errors contain a server-generated request ID.
+
+Query parameters are `page_size` (default 50, range 1–100) and optional `cursor`.
+Duplicate/unknown query parameters are rejected. The response is
+`{"data": [...], "next_cursor": null-or-string}`. Events expose only ID, actor type,
+actor membership ID, action, target ID, policy revision, correlation request ID,
+UTC timestamp and sanitized outcome. Identity claims, actor-reference text and
+conversation content are not serialized. Pagination uses ascending
+`(occurred_at, id)` keyset order and retrieves at most page size plus one row.
+It does not promise a frozen snapshot across pages while new events are appended.
+
+Cursors use AES-256-GCM with a random nonce and authenticated tenant/list binding;
+positions and tenant IDs are encrypted. Foreign, altered or malformed cursors
+receive the same 422 after membership authorization. Cursors remain valid after
+API restart with the same deployment key and do not require the anchor row to
+remain present. Rotation invalidates outstanding cursors; restart pagination
+from its first page. Preparation generates an independent 32-byte base64
+`audit_cursor_key` in the protected secret directory and retains it on repetition.
+Only API mounts it. Missing/invalid cursor key or OIDC configuration prevents
+startup; startup performs no schema mutation or JWKS request. HTTPS/DB clients
+are disposed during shutdown and file/certificate/database work stays outside
+the event loop. Approved behavior contracts remain in [Design.md](docs/Design.md).

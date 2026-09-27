@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import text
 
+from arbiter.identity.audit_cursor import AuditPosition
 from arbiter.persistence.tenant import TenantTransaction
 
 
@@ -36,6 +37,19 @@ class AuditRecord:
     actor_membership_id: UUID | None
     actor_role: str | None
     occurred_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AuditEvent:
+    id: UUID
+    actor_type: Literal["member", "operator"]
+    actor_membership_id: UUID | None
+    action: str
+    target_id: UUID
+    policy_revision: int
+    request_id: UUID | None
+    occurred_at: datetime
+    outcome: Literal["succeeded", "denied"]
 
 
 class TenantRepository:
@@ -83,6 +97,42 @@ class MembershipRepository:
 class AuditRepository:
     def __init__(self, transaction: TenantTransaction) -> None:
         self._transaction = transaction
+
+    def list_page(self, *, page_size: int, after: AuditPosition | None) -> list[AuditEvent]:
+        if not 1 <= page_size <= 100:
+            raise ValueError("page size must be 1-100")
+        rows = self._transaction.connection().execute(
+            text("""
+                SELECT id, actor_type, actor_membership_id, action, target_id,
+                       policy_revision, request_id, occurred_at, outcome
+                FROM arbiter.audit_events
+                WHERE tenant_id=:tenant
+                  AND (:first_page OR (occurred_at,id) >
+                       (CAST(:after_time AS timestamptz), CAST(:after_id AS uuid)))
+                ORDER BY occurred_at, id LIMIT :limit
+            """),
+            {
+                "tenant": self._transaction.context.tenant_id,
+                "first_page": after is None,
+                "after_time": None if after is None else after.occurred_at,
+                "after_id": None if after is None else after.event_id,
+                "limit": page_size + 1,
+            },
+        )
+        return [
+            AuditEvent(
+                row.id,
+                row.actor_type,
+                row.actor_membership_id,
+                row.action,
+                row.target_id,
+                row.policy_revision,
+                row.request_id,
+                row.occurred_at,
+                row.outcome,
+            )
+            for row in rows
+        ]
 
     def append_member_event(
         self,

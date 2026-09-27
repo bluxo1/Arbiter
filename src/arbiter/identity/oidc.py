@@ -66,9 +66,10 @@ class OidcVerifier:
         *,
         transport: httpx.AsyncBaseTransport | None = None,
         clock: Callable[[], float] = monotonic,
+        trust: ssl.SSLContext | None = None,
     ) -> None:
         self._settings = settings
-        trust = ssl.create_default_context(cafile=settings.ca_file)
+        trust = trust if trust is not None else ssl.create_default_context(cafile=settings.ca_file)
         self._client = httpx.AsyncClient(
             verify=trust,
             trust_env=False,

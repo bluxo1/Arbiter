@@ -5,6 +5,7 @@ from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
+from test_foundation import secret_directory as secret_directory
 
 from arbiter.main import create_app
 from arbiter.operations.provision import MemberInput, MemberRole, main
@@ -47,10 +48,8 @@ def test_argument_errors_do_not_echo_rejected_values(
 
 
 def test_api_contains_no_operator_or_inference_routes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    secret_directory: Path,
 ) -> None:
-    (tmp_path / "db_runtime_password").write_text("inert-test-password-" + "x" * 32)
-    monkeypatch.setenv("ARBITER_DB_SECRET_DIRECTORY", str(tmp_path))
     with TestClient(create_app()) as client:
         for path in (
             "/v1/operator",

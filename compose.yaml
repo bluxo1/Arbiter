@@ -29,7 +29,7 @@ services:
     configs:
       - source: oidc_ca
         target: /run/config/oidc-ca.pem
-    secrets: [db_runtime_password]
+    secrets: [db_runtime_password, audit_cursor_key]
     ports: ["127.0.0.1:${ARBITER_API_PORT:-8000}:8000"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -168,6 +168,8 @@ volumes:
       device: ${ARBITER_DATA_LINUX_ROOT:?Set the Linux-visible Arbiter data root}/ollama/models
 
 secrets:
+  audit_cursor_key:
+    file: ${ARBITER_SECRETS_DIR:?Set the protected secret directory}/audit_cursor_key
   db_bootstrap_password:
     file: ${ARBITER_SECRETS_DIR:?Set the protected secret directory}/db_bootstrap_password
   db_migration_password:

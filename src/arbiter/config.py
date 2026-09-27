@@ -1,5 +1,6 @@
 """Deployment configuration: secret values never come from environment strings."""
 
+import base64
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -9,6 +10,24 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
 
 DatabaseRole = Literal["bootstrap", "migration", "operator", "runtime"]
+
+
+class AuditSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="ARBITER_AUDIT_", frozen=True)
+
+    key_file: Path = Path("/run/secrets/audit_cursor_key")
+
+    def key(self) -> bytes:
+        try:
+            encoded = self.key_file.read_bytes()
+            if len(encoded) > 128:
+                raise ValueError("oversized key file")
+            key = base64.b64decode(encoded.strip(), validate=True)
+            if len(key) != 32:
+                raise ValueError("invalid key length")
+            return key
+        except ValueError:
+            raise ValueError("invalid audit cursor key file") from None
 
 
 class OidcSettings(BaseSettings):

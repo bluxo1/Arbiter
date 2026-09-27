@@ -1,3 +1,4 @@
+import base64
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,13 @@ def secret_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory.mkdir()
     # Inert test credential only; never a deployment credential.
     (directory / "db_runtime_password").write_text("inert-test-password-" + "x" * 32)
+    key_file = directory / "audit_cursor_key"
+    key_file.write_bytes(base64.b64encode(bytes(32)))
+    monkeypatch.setenv("ARBITER_AUDIT_KEY_FILE", str(key_file))
+    monkeypatch.setenv("ARBITER_OIDC_ISSUER", "https://fixture.invalid/issuer")
+    monkeypatch.setenv("ARBITER_OIDC_AUDIENCE", "arbiter-api")
+    monkeypatch.setenv("ARBITER_OIDC_JWKS_URL", "https://fixture.invalid/keys")
+    monkeypatch.delenv("ARBITER_OIDC_CA_FILE", raising=False)
     monkeypatch.setenv("ARBITER_DB_SECRET_DIRECTORY", str(directory))
     return directory
 
@@ -40,9 +48,9 @@ def test_debug_documentation_disabled(secret_directory: Path, path: str) -> None
 
 
 def test_missing_runtime_secret_prevents_start(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    secret_directory: Path,
 ) -> None:
-    monkeypatch.setenv("ARBITER_DB_SECRET_DIRECTORY", str(tmp_path))
+    (secret_directory / "db_runtime_password").unlink()
     with pytest.raises(FileNotFoundError), TestClient(create_app()):
         pass
 
@@ -61,3 +69,23 @@ def test_empty_secret_rejected(secret_directory: Path) -> None:
     (secret_directory / "db_runtime_password").write_text("")
     with pytest.raises(ValueError, match="database secret must contain"):
         DatabaseSettings().password("runtime")
+
+
+def test_missing_cursor_secret_prevents_start(secret_directory: Path) -> None:
+    (secret_directory / "audit_cursor_key").unlink()
+    with pytest.raises(FileNotFoundError), TestClient(create_app()):
+        pass
+
+
+def test_invalid_cursor_secret_prevents_start(secret_directory: Path) -> None:
+    (secret_directory / "audit_cursor_key").write_text("invalid-base64")
+    with pytest.raises(ValueError, match="invalid audit cursor key file"), TestClient(create_app()):
+        pass
+
+
+def test_missing_oidc_configuration_prevents_start(
+    secret_directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ARBITER_OIDC_ISSUER")
+    with pytest.raises(ValueError), TestClient(create_app()):
+        pass

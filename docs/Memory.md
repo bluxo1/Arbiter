@@ -678,3 +678,102 @@ docker compose @taskCompose --profile operations down
 
 - All three isolated services stopped with **exit 0/no OOM**, captured in `final-shutdown.json`. Removed only their project containers/control/edge networks; retained named volumes, all D: data/credentials/reports and the existing external identity network. At **02:39:07 IST**, only the preexisting Keycloak and two unrelated Axiom services were running; port 18002 was no longer published. Keycloak is running after the explicitly recorded development restart; no unrelated service was restarted.
 - Frozen source comparison, final JUnit inspection, full diff/security review, `git diff --check`, seven approved-document comparisons and empty-index check passed. HEAD remains the entry revision; all 18 task files are unstaged. Reports are historical evidence from this isolated run; reproduce using the retained project env/storage or prepare a new independent D: root for a genuinely empty cluster. Stop after this bounded task; Phase 2 remains incomplete.
+
+### 2026-09-27 — Phase 2 task 2: authenticated tenant audit list
+
+**Bounded task completed; Phase 2 remains incomplete.** Entry was clean on `main` at `165a39fde7480f6741f07c21194318ee82df48e3` (`feat: add OIDC identity and membership authorization`), superseding task 1's uncommitted snapshot. Read all approved documents and current memory. No contradiction requiring an approved specification change was found; the seven specification/workflow documents remain unchanged. No commit or push was authorized or performed.
+
+#### Files changed and observed boundary
+
+- Added `src/arbiter/transport/audit.py`, `operations/audit.py`, `identity/audit_cursor.py`, `tests/test_audit_endpoint.py` and `tests/test_audit_cursor.py`. Modified `src/arbiter/main.py`, `config.py`, `identity/oidc.py`, `persistence/repositories.py`, `persistence/tenant.py` (stale docstring only), `tests/test_foundation.py`, `tests/test_operator_validation.py`, `compose.yaml`, `scripts/prepare-local.ps1`, README and this memory entry. No dependency lock, image pin, migration, database grant or RLS policy changed. This is 16 unstaged task files, including memory.
+- Wired exactly **GET `/v1/tenants/{tenant_id}/audit`** through the existing OIDC and active-membership service. Member/admin permissions follow [Design.md](Design.md). The path UUID is a selector; JWT tenant/role and custom tenant/role headers establish no authority. The service verifies identity, resolves fresh active membership and binds transaction-local context before cursor processing or audit repository access. Synchronous DB work and cursor cryptography run in the existing bounded worker boundary.
+- The repository uses an explicit tenant predicate plus the existing FORCE RLS, existing tenant/time/ID index and bound keyset parameters. Response fields are explicitly projected content-free metadata, omitting global identity claims and free-text actor references. Default page size 50/max 100, one-row lookahead, ascending timestamp/UUID order, strict response models, generic 401/404/422/503 errors with generated request IDs and `no-store` were implemented. No read audit mutation was added; provisioning/security mutations retain their existing atomic audit guarantees.
+- Cursor implementation choice: fixed-size encrypted positions, AES-256-GCM, random 96-bit nonce, authenticated tenant/list purpose and format version. A cursor from another tenant fails the same validation path as an altered/malformed cursor after membership authorization. Cursor validation performs no cross-tenant object lookup. Deleted anchors still permit keyset continuation; pagination does not claim a frozen snapshot across separately authorized requests. There is no positive membership cache.
+- Added independent file-provisioned **32-byte** cursor key `audit_cursor_key`, base64 encoded. Preparation retains all existing values and checks reader ACLs. API mounts only runtime DB password and cursor key, both read-only; no operator/migration/bootstrap or Keycloak client credential is mounted into API. Missing/invalid cursor secret or OIDC configuration denies startup. Certificate/key-file IO is outside the event loop; the verifier accepts only an explicitly server-built trust context, preserving HTTPS verification. Startup performs no schema mutation or JWKS fetch; shutdown closes HTTPS client and DB engine.
+- No API keys, policy/model/usage endpoints, quota/budget enforcement, Redis admission or provider inference were implemented. `/health/ready` remains 503; chat remains unavailable. Foundation diagnostics still do not certify complete identity/workload/enforcement/recovery readiness.
+
+#### Environment, live issuer and storage evidence
+
+- Evidence/scripts/public env: **`D:\AI & ML\ArbiterData\phase2\audit`**; isolated fresh PostgreSQL/Redis data and protected secrets: its **`ArbiterData`** child. Compose project **`arbiter-phase2-audit`**, API loopback **18003**. Existing default/Phase 1/task 1 storage and shared E: Docker/WSL data were not moved or deleted. Ollama was never started; no model download or inference occurred.
+- Used the approved Keycloak issuer/audience/RS256/private HTTPS JWKS and explicit public CA recorded in task 1 and Phase 0. No Keycloak configuration/account/client was created or changed, and Keycloak was **not restarted** this task. The live diagnostic reused the existing separately held probe client solely to obtain a fresh token, then explicitly provisioned/removed synthetic Arbiter memberships through operator credentials.
+- Actual deployed API verified that live token and returned its member's audit metadata. Both an existing unauthorized tenant and absent tenant returned identical generic 404 errors. Missing authentication returned 401; malformed cursor 422; readiness 503; chat 404. The probe held its token/cursor only in memory while the isolated API was restarted. The same cursor then returned the next distinct event and terminal `next_cursor=null`. Report **`live-audit.json`** contains only booleans; `restart-checkpoint.json`/`restart-complete.signal` contain only coordination markers. No JWT, actual identity claims, secret or cursor was saved or printed.
+- Inspected actual API: UID/GID 10001, read-only root, exact two read-only secret mounts, read-only public CA, approved identity/control/edge networks and no provider network. PostgreSQL/Redis expose no host ports. `runtime-topology.json`. Repeated preparation preserved all **five** secret files byte-for-byte; cursor file is 44 encoded bytes and its directory is protected. No values/hashes were published (`secret-provisioning.json`).
+
+#### Exact checks and actual results
+
+```powershell
+$taskEvidence = 'D:\AI & ML\ArbiterData\phase2\audit'
+$taskSecrets = "$taskEvidence\ArbiterData\secrets"
+$taskCompose = @('--env-file', "$taskEvidence\audit.env", '-p', 'arbiter-phase2-audit')
+.\scripts\prepare-local.ps1 -DataRoot "$taskEvidence\ArbiterData"
+docker compose @taskCompose config --quiet
+docker compose @taskCompose up -d --wait --wait-timeout 120 postgres redis
+docker compose @taskCompose --profile operations run --rm bootstrap
+docker compose @taskCompose --profile operations run --rm migrate
+docker build --target verification -t arbiter-local:verification .
+docker compose @taskCompose build api
+docker compose @taskCompose up -d --wait --wait-timeout 120 api
+$taskMounts = @(
+  '--mount', "type=bind,source=$taskSecrets\db_runtime_password,target=/run/secrets/db_runtime_password,readonly",
+  '--mount', "type=bind,source=$taskSecrets\db_operator_password,target=/run/secrets/db_operator_password,readonly",
+  '--mount', "type=bind,source=$taskSecrets\db_migration_password,target=/run/secrets/db_migration_password,readonly")
+docker run --rm --read-only --tmpfs /tmp --network arbiter-phase2-audit_control `
+  -e ARBITER_TEST_DATABASE=1 -e ARBITER_TEST_REDIS=1 `
+  --mount "type=bind,source=$taskEvidence,target=/reports" @taskMounts `
+  arbiter-local:verification python -m pytest -q -p no:cacheprovider `
+  --ignore=tests/test_migrations.py --junitxml=/reports/audit-and-isolation-tests.xml
+docker run --rm --read-only --tmpfs /tmp --network arbiter-phase2-audit_control `
+  -e ARBITER_TEST_MIGRATIONS=1 --mount "type=bind,source=$taskEvidence,target=/reports" `
+  --mount "type=bind,source=$taskSecrets\db_bootstrap_password,target=/run/secrets/db_bootstrap_password,readonly" `
+  --mount "type=bind,source=$taskSecrets\db_migration_password,target=/run/secrets/db_migration_password,readonly" `
+  arbiter-local:verification python -m pytest -q -p no:cacheprovider tests/test_migrations.py `
+  --junitxml=/reports/migration-tests.xml
+docker run --rm --network none --read-only --tmpfs /tmp `
+  --mount 'type=bind,source=E:\Arbiter,target=/workspace,readonly' -w /workspace `
+  -e PYTHONPATH=/workspace/src arbiter-local:verification ruff check --no-cache .
+docker run --rm --network none --read-only --tmpfs /tmp `
+  --mount 'type=bind,source=E:\Arbiter,target=/workspace,readonly' -w /workspace `
+  -e PYTHONPATH=/workspace/src arbiter-local:verification ruff format --check --no-cache .
+docker run --rm --network none --read-only --tmpfs /tmp `
+  arbiter-local:verification mypy --cache-dir /tmp/mypy
+docker run --rm --network none --read-only --tmpfs /tmp -e PIP_NO_CACHE_DIR=1 `
+  arbiter-local:verification python -m pip check
+```
+
+| Check | Actual result and limitation |
+| --- | --- |
+| Frozen-image full regression with real PostgreSQL/Redis | **214 passed**, zero failures/errors/skips, **27.85 seconds**. Includes prior 169 cases, 29 new audit HTTP cases, 13 cursor/config cases and three startup denials. Existing TestClient/httpx deprecation warning remains unsuppressed. `audit-and-isolation-tests.xml`. |
+| Separate disposable migration gate | **6 passed**, zero failures/errors/skips, **20.06 seconds**. Empty/previous `0001`/`0002`/`0003`, repeated head and seeded preservation/round trips remain proven. Application schema was never downgraded. `migration-tests.xml`. |
+| HTTP authorization/pagination negatives | Missing/malformed/expired/wrong issuer/audience, duplicate/mixed credentials, unprovisioned subjects, suspension, forged claims/headers/selectors, A/B reads and indistinguishable missing/unauthorized tenants passed. Malformed/foreign/tampered/oversized cursors, duplicate/unknown queries and invalid sizes passed. Tied timestamps, complete nonduplicating pages, max size, empty pages and deleted anchors passed. Failed identities caused zero DB queries; unavailable JWKS returned sanitized 503. |
+| HTTP pool/context evidence | A/B/A audit requests used the same PostgreSQL backend with the correct established tenant setting before each explicitly scoped query. Afterwards context was empty and unscoped audit reads returned zero. A deliberately poisoned session produced generic 503 and was discarded; next authorized request passed on a different backend. All prior missing-context/read/write/join/FK/runtime-migration/role-bypass/FORCE-RLS negatives passed. |
+| Live approved Keycloak + actual API restart | Passed in `live_audit_probe.py`, run by the frozen verification container on control/external identity networks. Only individual test DB files, public CA and existing diagnostic client secret were mounted to the probe; no Docker socket. Actual `docker compose @taskCompose restart api` then `up -d --wait --wait-timeout 60 api` passed before signalling the in-memory probe. `live-audit.json`. |
+| Static/source/package integrity | Ruff lint passed, **53** Python files formatted; frozen strict mypy passed for **43** files; pip check found no broken requirements. `source_snapshot.py` compared all **43** source/test/migration Python files byte-for-byte against the tested image: matched (`source-snapshot.json`). Existing hash locks and immutable image pins are unchanged. |
+| Catalog verification | `python /reports/security_catalog.py` in a verification container with migration credential only passed. Head remains `0004_identity_lookup`; restricted owner/EXECUTE/search path/role memberships unchanged; no runtime/operator helper-role membership; zero leftover disposable DBs and synthetic principals. `database-security.json`. The script's historical context-free-row field uses the forced owner; current runtime evidence comes from tests above. |
+| Dependency advisory check | Fresh OSV `POST https://api.osv.dev/v1/querybatch`, queries parsed from the unchanged development lock: **39** complete responses, **zero** advisory packages. `dependency-audit.json`. This does not certify OS/container libraries. |
+| Repository secret scan and logs | Digest-pinned Trivy **0.74.0**, networking disabled/read-only checkout, `.git` excluded: exit 0, **zero** findings. `repository-secret-scan.json`. Dedicated API/PG/Redis logs: zero matches against all five actual deployment secrets and existing probe-client secret, zero JWT-like patterns; raw logs/values not saved (`log-secret-comparison.json`). |
+
+Local tested images: runtime **`sha256:38dd35d81eb87a4aa5ace903f82b29662dd95f6b2c066efdd90dfe8fe6d88bdb`**; final verification **`sha256:46eb2e293fe13441cbb433bb377da2593bd180019f11d523064153d9cee5a675`**. Local builds are not a published release or committed/deployed revision.
+
+Corrections, not passes: initial static checks caught import/line-length findings and required explicit required OIDC constructor values for strict typing. First focused run had 56 passes/one failure because its SQL observer also intercepted the deliberately unscoped negative probe; narrowed observation to the actual page query while retaining the zero-row assertion. First full run had 213 passes/one failure because an old operator-route fixture lacked the newly required startup configuration/key; it now reuses the complete inert fixture and retains every route denial. Final 214+6 results above supersede these failures; no authority, TLS, negative test or privilege was weakened.
+
+#### Stopped-state handoff and remaining work
+
+At **05:53:14 IST**, `docker compose @taskCompose stop api redis postgres` produced exit 0/no OOM for all three, recorded in `final-shutdown.json`. `docker compose @taskCompose --profile operations down` removed only this project's containers/control/edge networks, retaining named volumes, protected credentials, D: data/reports and the external identity network. Only preexisting Keycloak and two unrelated Axiom services remained running; API port 18003 was no longer published. The disposable live probe was removed after exit 0. No unrelated service restart, storage relocation or volume deletion occurred.
+
+Repository secret scan command (also repeated after this memory update):
+
+```powershell
+docker run --rm --network none --read-only --tmpfs /tmp --memory 1g --cpus 2 `
+  --mount 'type=bind,source=E:\Arbiter,target=/workspace,readonly' `
+  --mount "type=bind,source=$taskEvidence,target=/reports" `
+  --mount "type=bind,source=$taskEvidence\ArbiterData\tmp,target=/scratch" `
+  aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 `
+  fs --cache-dir /scratch/trivy --scanners secret --skip-dirs /workspace/.git `
+  --timeout 3m --exit-code 1 --no-progress --format json `
+  --output /reports/repository-secret-scan.json /workspace
+```
+
+- Full bounded diff/security review, `git diff --check`, seven approved-document comparisons, empty-index and unchanged-HEAD checks passed. Evidence is historical for this isolated run; reproduce with its retained env/storage, not by assuming it is currently serving requests.
+- Remaining Phase 2: API key creation/list/revocation and scopes, tenant model/usage/request metadata endpoints, operator policy administration, atomic audit for those new mutations, and complete mixed-credential/key-secret/revocation/suspension admission-lock race gates. The read-only endpoint does not claim dispatch-race guarantees. Phase 2 is **not complete** and inference stays unavailable.
+- No human decision blocks this completed task. The earlier OS/container-library vulnerability scan remains incomplete and assigned before Phase 5 release. Development Keycloak hardening and CA renewal remain the previously recorded operational concerns. Current Python/secret checks do not resolve those release items.
+- Next bounded task, proposed only: tenant-admin API key creation with tenant-scoped persistence, one-time secret return, separately file-provisioned verifier pepper and atomic audit, keeping workload authentication/inference unavailable until separately authorized. Await another task instruction; do not implement it here. No files were staged, committed or pushed. Stop after this bounded task.
