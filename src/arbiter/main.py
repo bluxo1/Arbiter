@@ -1,4 +1,4 @@
-"""Composition root: health and authenticated audit reads; inference stays unavailable."""
+"""Composition root: health, audit and key administration; no inference."""
 
 import os
 import ssl
@@ -12,9 +12,11 @@ from sqlalchemy.engine import Engine
 from arbiter.config import AuditSettings, DatabaseSettings, KeySettings, OidcSettings
 from arbiter.identity.access import ManagementAccess
 from arbiter.identity.audit_cursor import AuditCursor
+from arbiter.identity.key_cursor import KeyCursor
 from arbiter.identity.keys import KeyIssuer
 from arbiter.identity.oidc import OidcVerifier
 from arbiter.operations.audit import AuditService
+from arbiter.operations.key_listing import KeyListService
 from arbiter.operations.keys import KeyService
 from arbiter.persistence.tenant import runtime_engine
 from arbiter.transport.audit import router as audit_router
@@ -22,7 +24,7 @@ from arbiter.transport.health import router as health_router
 from arbiter.transport.keys import router as key_router
 
 
-def _resources() -> tuple[Engine, OidcSettings, ssl.SSLContext, AuditCursor, KeyIssuer]:
+def _resources() -> tuple[Engine, OidcSettings, ssl.SSLContext, AuditCursor, KeyIssuer, KeyCursor]:
     # Configuration, certificate and secret-file IO are outside the event loop.
     settings = OidcSettings(
         issuer=os.environ.get("ARBITER_OIDC_ISSUER", ""),
@@ -30,30 +32,43 @@ def _resources() -> tuple[Engine, OidcSettings, ssl.SSLContext, AuditCursor, Key
         jwks_url=os.environ.get("ARBITER_OIDC_JWKS_URL", ""),
     )
     trust = ssl.create_default_context(cafile=settings.ca_file)
-    cursors = AuditCursor(AuditSettings().key())
+    cursor_key = AuditSettings().key()
+    cursors = AuditCursor(cursor_key)
     keys = KeySettings()
     issuer = KeyIssuer(keys.pepper(), keys.pepper_version)
-    return runtime_engine(DatabaseSettings()), settings, trust, cursors, issuer
+    return (
+        runtime_engine(DatabaseSettings()),
+        settings,
+        trust,
+        cursors,
+        issuer,
+        KeyCursor(cursor_key),
+    )
 
 
 def create_app(
-    *, audit_service: AuditService | None = None, key_service: KeyService | None = None
+    *,
+    audit_service: AuditService | None = None,
+    key_service: KeyService | None = None,
+    key_list_service: KeyListService | None = None,
 ) -> FastAPI:
     """Optional explicit service wiring is for host-side tests, never request input."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        if audit_service is not None or key_service is not None:
+        if audit_service is not None or key_service is not None or key_list_service is not None:
             app.state.audit_service = audit_service
             app.state.key_service = key_service
+            app.state.key_list_service = key_list_service
             yield
             return
-        engine, settings, trust, cursors, issuer = await to_thread.run_sync(_resources)
+        engine, settings, trust, cursors, issuer, key_cursors = await to_thread.run_sync(_resources)
         try:
             async with OidcVerifier(settings, trust=trust) as verifier:
                 access = ManagementAccess(verifier, engine)
                 app.state.audit_service = AuditService(access, cursors)
                 app.state.key_service = KeyService(access, issuer)
+                app.state.key_list_service = KeyListService(access, key_cursors)
                 yield
         finally:
             await to_thread.run_sync(engine.dispose)
@@ -61,6 +76,8 @@ def create_app(
                 del app.state.audit_service
             if hasattr(app.state, "key_service"):
                 del app.state.key_service
+            if hasattr(app.state, "key_list_service"):
+                del app.state.key_list_service
 
     app = FastAPI(debug=False, docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.include_router(health_router)

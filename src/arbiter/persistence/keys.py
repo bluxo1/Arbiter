@@ -1,7 +1,8 @@
-"""One tenant-scoped, parameterized, audited creation function; no general key writes."""
+"""Scoped metadata reads and audited creation; no general key writes or secret reads."""
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import text
@@ -17,9 +18,57 @@ class CreatedKey:
     expires_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class KeyMetadataRecord:
+    id: UUID
+    public_id: str
+    label: str
+    scopes: tuple[Literal["inference:write", "usage:read"], ...]
+    created_at: datetime
+    expires_at: datetime
+    revoked_at: datetime | None
+
+
 class KeyRepository:
     def __init__(self, transaction: TenantTransaction) -> None:
         self._transaction = transaction
+
+    def list_page(self, *, page_size: int, after: UUID | None) -> list[KeyMetadataRecord]:
+        if not 1 <= page_size <= 100:
+            raise ValueError("page size must be 1-100")
+        statement = (
+            text("""
+            SELECT id, public_id, label, scopes, created_at, expires_at, revoked_at
+            FROM arbiter.api_keys WHERE tenant_id=:tenant
+            ORDER BY id LIMIT :limit
+        """)
+            if after is None
+            else text("""
+            SELECT id, public_id, label, scopes, created_at, expires_at, revoked_at
+            FROM arbiter.api_keys WHERE tenant_id=:tenant AND id > CAST(:after AS uuid)
+            ORDER BY id LIMIT :limit
+        """)
+        )
+        rows = self._transaction.connection().execute(
+            statement,
+            {
+                "tenant": self._transaction.context.tenant_id,
+                "after": after,
+                "limit": page_size + 1,
+            },
+        )
+        return [
+            KeyMetadataRecord(
+                row.id,
+                row.public_id,
+                row.label,
+                tuple(row.scopes),
+                row.created_at,
+                row.expires_at,
+                row.revoked_at,
+            )
+            for row in rows
+        ]
 
     def create(
         self,

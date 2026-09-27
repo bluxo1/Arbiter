@@ -1,8 +1,8 @@
 # Arbiter
 
-Phase 1 foundation and bounded Phase 2 identity, audit access and key creation. Read
+Phase 1 foundation and bounded Phase 2 identity, audit access and key administration. Read
 [the agent workflow](docs/Agents.md) and [project memory](docs/Memory.md) before changes.
-The API exposes health, authenticated tenant audit reads and admin key creation. Liveness returns 200;
+The API exposes health, authenticated tenant audit reads and admin key creation/listing. Liveness returns 200;
 readiness deliberately returns 503 until all required security gates exist.
 Inference and API key authentication remain unavailable; Phase 2 is incomplete.
 
@@ -148,7 +148,7 @@ verify retained data and credentials. See project memory for the actual closure
 evidence and Phase 1 assessment. Inference remains unavailable.
 
 OIDC verification and membership authorization back the audit-list endpoint.
-Key listing/revocation, other metadata endpoints, admission and inference are unavailable.
+Key revocation, other metadata endpoints, admission and inference are unavailable.
 `OidcVerifier` is an async context manager with bounded HTTPS JWKS retrieval,
 RS256-only signature checks, exact issuer/audience checks, required `exp/iss/sub/aud`
 and validation of optional `nbf/iat`. Clock skew is configurable from 0 to 60
@@ -234,7 +234,7 @@ The credential format is `arb1.<32-character public identifier>.<43-character
 base64url secret>`; the secret contains 32 random bytes. Store the returned
 credential securely at the caller. It cannot be retrieved or replayed after a
 lost response. Repeated valid POSTs create distinct keys; creation has no
-idempotency contract. Neither listing/revocation nor workload key authentication
+idempotency contract. Neither revocation nor workload key authentication
 is implemented in this bounded task. Creating a key does not enable inference.
 
 Preparation provisions an independent base64-encoded 32-byte `api_key_pepper`
@@ -257,3 +257,25 @@ The writer's tenant `UPDATE(status)` grant is required for `FOR UPDATE`; its
 NOLOGIN role has no runtime membership or schema CREATE. FORCE RLS applies to
 keys and all other tenant tables. Key metadata is immutable except the reserved
 revocation timestamp; no revocation operation is exposed yet.
+
+`GET /v1/tenants/{tenant_id}/keys` requires verified OIDC identity and an active
+database admin membership. It returns `{"data": [...], "next_cursor": null-or-string}`
+with only `id`, `public_id`, `label`, `scopes`, `created_at`, `expires_at` and
+`revoked_at` per key. It includes expired and revoked metadata without enabling
+those credentials. It never queries verifiers or pepper versions and never issues,
+returns or reconstructs secrets. No key-detail or revocation route is exposed.
+
+Query parameters are `page_size` (default 50, range 1–100) and optional `cursor`.
+Duplicate/unknown parameters are rejected after identity/membership/admin checks.
+Pagination uses ascending UUID keyset order on the existing `(tenant_id,id)` index,
+fetching at most page size plus one row. UUID order is not creation-time order;
+new keys may appear before a previous cursor, so separately fetched pages do not
+promise a fixed snapshot. Cursors remain usable without an anchor lookup and after
+restart with the same deployment cursor key. They use AES-256-GCM, a random nonce
+and a separate key-list purpose plus tenant binding. The existing `audit_cursor_key`
+file is reused with domain separation; audit and key-list cursors are not
+interchangeable. Rotation invalidates outstanding cursors. Unauthorized and absent
+tenants both return generic 404; insufficient admin permission returns 403;
+invalid cursors/queries return sanitized 422; unavailable dependencies return 503.
+Successful and error responses carry `Cache-Control: no-store`. This read-only task
+changes no schema, grants, RLS policy, secret provisioning or approved specification.

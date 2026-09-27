@@ -24,9 +24,11 @@ from test_membership import members as members
 from arbiter.config import DatabaseSettings
 from arbiter.identity.access import ManagementAccess
 from arbiter.identity.audit_cursor import AuditCursor
+from arbiter.identity.key_cursor import KeyCursor
 from arbiter.identity.keys import KeyIssuer
 from arbiter.main import create_app
 from arbiter.operations.audit import AuditService
+from arbiter.operations.key_listing import KeyListService
 from arbiter.operations.keys import KeyService
 from arbiter.persistence.operator import OperatorRepository, operator_transaction
 
@@ -54,6 +56,7 @@ async def client(members: Members, pepper: bytes) -> AsyncIterator[httpx.AsyncCl
         app = create_app(
             audit_service=AuditService(access, AuditCursor(secrets.token_bytes(32))),
             key_service=KeyService(access, KeyIssuer(pepper, 3)),
+            key_list_service=KeyListService(access, KeyCursor(secrets.token_bytes(32))),
         )
         async with (
             app.router.lifespan_context(app),
@@ -154,7 +157,7 @@ async def test_success_returns_only_once_and_persists_hmac_with_matching_audit(
         await client.get(
             path(members.tenant_b), headers=auth(members.token(subject=members.subject_b))
         )
-    ).status_code == 405
+    ).status_code == 200
     assert (
         await client.post(
             f"{path(members.tenant_b)}/{row.id}/revoke",

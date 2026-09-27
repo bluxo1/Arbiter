@@ -1,5 +1,6 @@
-"""Bounded creation transport. No key read, verification or revocation route."""
+"""Key creation and metadata listing only; no verification or revocation route."""
 
+from typing import Literal
 from uuid import UUID
 
 from anyio import fail_after
@@ -9,7 +10,9 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr, fie
 from starlette.requests import ClientDisconnect
 
 from arbiter.identity.access import InsufficientRole, MembershipUnavailable
+from arbiter.identity.key_cursor import InvalidKeyQuery
 from arbiter.identity.oidc import IdentityUnavailable, InvalidIdentity
+from arbiter.operations.key_listing import KeyListService
 from arbiter.operations.keys import InvalidKeyRequest, KeyCreationConflict, KeyService
 from arbiter.persistence.identity import InaccessibleTenant
 from arbiter.transport.errors import error_response
@@ -37,6 +40,67 @@ class KeyResponse(BaseModel):
 
 class BodyTooLarge(Exception):
     pass
+
+
+class KeyMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    id: UUID
+    public_id: str = Field(pattern="^[0-9a-f]{32}$")
+    label: str = Field(min_length=1, max_length=64)
+    scopes: tuple[Literal["inference:write", "usage:read"], ...] = Field(min_length=1, max_length=2)
+    created_at: AwareDatetime
+    expires_at: AwareDatetime
+    revoked_at: AwareDatetime | None
+
+
+class KeyListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    data: tuple[KeyMetadata, ...]
+    next_cursor: str | None
+
+
+@router.get("/v1/tenants/{tenant_id}/keys", response_model=KeyListResponse)
+async def list_keys(tenant_id: str, request: Request) -> JSONResponse:
+    try:
+        token = management_bearer(request)
+        try:
+            selector = UUID(tenant_id)
+        except ValueError:
+            raise InvalidKeyQuery() from None
+        service: KeyListService | None = getattr(request.app.state, "key_list_service", None)
+        if service is None:
+            raise MembershipUnavailable()
+        page = await service.list(token, selector, list(request.query_params.multi_items()))
+        response = KeyListResponse(
+            data=tuple(
+                KeyMetadata(
+                    id=item.id,
+                    public_id=item.public_id,
+                    label=item.label,
+                    scopes=item.scopes,
+                    created_at=item.created_at,
+                    expires_at=item.expires_at,
+                    revoked_at=item.revoked_at,
+                )
+                for item in page.data
+            ),
+            next_cursor=page.next_cursor,
+        )
+        return JSONResponse(
+            content=response.model_dump(mode="json"), headers={"Cache-Control": "no-store"}
+        )
+    except InvalidIdentity:
+        return error_response(401, "invalid_credentials", "Invalid credentials")
+    except InaccessibleTenant:
+        return error_response(404, "not_found", "Resource not found")
+    except InsufficientRole:
+        return error_response(403, "permission_denied", "Permission denied")
+    except InvalidKeyQuery:
+        return error_response(422, "invalid_fields", "Invalid key query")
+    except (IdentityUnavailable, MembershipUnavailable):
+        return error_response(503, "unavailable", "Service unavailable")
 
 
 async def _body(request: Request) -> bytes:
