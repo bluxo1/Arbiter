@@ -438,17 +438,19 @@ def test_policy_history_immutable_and_owner_forced_rls(policies: LocalStore) -> 
         )
 
 
-def test_accounting_schema_requires_future_safe_update_path(policies: LocalStore) -> None:
-    with policies.migration.begin() as connection:
-        connection.execute(text("CREATE TABLE arbiter.requests (id uuid)"))
-    try:
-        with pytest.raises(RuntimeError, match="accounting-aware"):
-            PolicyService(policies.operator).set_policy(policies.tenants[0], PolicyInput())
-        assert revision(policies, policies.tenants[0]) == 1
-        assert len(audits(policies, policies.tenants[0])) == 1
-    finally:
-        with policies.migration.begin() as connection:
-            connection.execute(text("DROP TABLE arbiter.requests RESTRICT"))
+def test_accounting_aware_guard_preserves_empty_tenant_policy_updates(policies: LocalStore) -> None:
+    result = PolicyService(policies.operator).set_policy(policies.tenants[0], PolicyInput())
+    assert result.revision == 2
+    with policies.runtime.begin() as connection:
+        assert (
+            connection.execute(
+                text("""
+            SELECT has_function_privilege(current_user,
+                'arbiter.assert_policy_limits(uuid,bigint,bigint,bigint)','EXECUTE')
+        """)
+            ).scalar_one()
+            is False
+        )
 
 
 def test_bad_cli_policy_does_not_expose_content_or_create_evidence(

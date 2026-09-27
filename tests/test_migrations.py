@@ -133,6 +133,7 @@ def test_registry_upgrade_preserves_legacy_configuration_without_fabricating_aud
         "0007_workload_key_lookup",
         "0008_tenant_policies",
         "0009_model_catalog",
+        "0010_model_registry",
     ],
 )
 def test_migration_empty_and_previous_then_repeat_and_round_trip(
@@ -147,6 +148,8 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
             ).scalar_one() == (
                 0
                 if previous == "0001_foundation"
+                else 8
+                if previous == "0010_model_registry"
                 else 7
                 if previous in {"0008_tenant_policies", "0009_model_catalog"}
                 else 5
@@ -159,13 +162,13 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
     with engine.begin() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
-            == "0010_model_registry"
+            == "0011_accounting_foundation"
         )
         assert (
             connection.execute(
                 text("SELECT count(*) FROM pg_tables WHERE schemaname='arbiter'")
             ).scalar_one()
-            == 8
+            == 13
         )
         assert (
             connection.execute(
@@ -174,7 +177,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
             WHERE n.nspname='arbiter' AND c.relrowsecurity AND c.relforcerowsecurity
         """)
             ).scalar_one()
-            == 5
+            == 10
         )
         assert (
             connection.execute(
@@ -211,6 +214,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
         "0007_workload_key_lookup",
         "0008_tenant_policies",
         "0009_model_catalog",
+        "0010_model_registry",
     ],
 )
 def test_upgrade_preserves_existing_tenant_and_audit(
@@ -253,6 +257,20 @@ def test_upgrade_preserves_existing_tenant_and_audit(
         """),
             {"tenant": tenant},
         ).one() == (event, "operator", "tenant_suspended", tenant)
+        for table in (
+            "quota_windows",
+            "budget_windows",
+            "requests",
+            "reservations",
+            "accounting_events",
+        ):
+            # Fixed migration-owned identifiers, and authenticated tenant value always bound.
+            query = (
+                sql.SQL("SELECT count(*) FROM {} WHERE tenant_id=:tenant")
+                .format(sql.Identifier("arbiter", table))
+                .as_string()
+            )
+            assert connection.execute(text(query), {"tenant": tenant}).scalar_one() == 0
 
 
 def test_revocation_upgrade_and_downgrade_preserve_existing_key_state(

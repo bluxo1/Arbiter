@@ -1,11 +1,18 @@
 # Arbiter
 
-Phase 1 foundation and bounded Phase 2 identity, audit, key administration and model catalogs. Read
+Phase 1/2 foundation and bounded Phase 3 accounting persistence. Read
 [the agent workflow](docs/Agents.md) and [project memory](docs/Memory.md) before changes.
 The API exposes health, authenticated tenant audit reads, admin key creation/listing/revocation,
 and tenant-approved model catalogs for OIDC members/admins and workload API keys. Liveness returns 200;
 readiness deliberately returns 503 until all required security gates exist.
-Inference, usage and request metadata endpoints remain unavailable; Phase 2 is incomplete.
+Inference, usage and request metadata endpoints remain unavailable; Phase 3 is incomplete.
+
+Migration `0011_accounting_foundation` adds tenant-owned UTC quota/budget windows,
+request/idempotency records, reservations and append-only accounting events with FORCE RLS.
+Scoped repositories read these records; runtime and operator roles have no direct write grants.
+No admission writer, rate limiter, dispatch, reconciliation or provider path exists yet.
+Window totals are not exposed as authoritative usage until the future atomic writer maintains
+them alongside request/reservation evidence. Migration creates no usage or production model rows.
 
 Model catalogs return only active, registered aliases approved by the tenant's current policy:
 `alias`, `output_cap`, `credit_charge`, and `policy_revision`. They use encrypted tenant-bound

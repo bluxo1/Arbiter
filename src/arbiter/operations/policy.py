@@ -69,6 +69,9 @@ class PolicyService:
             if tenant.policy_revision >= MAX_INTEGER:
                 raise ValueError("policy revision exhausted")
             repository = PolicyRepository(transaction)
+            repository.validate_limits(
+                policy.daily_quota, policy.monthly_budget, policy.concurrency
+            )
             repository.validate_aliases(policy.aliases)
             revision = tenant.policy_revision + 1
             repository.advance_revision(tenant.policy_revision, revision)

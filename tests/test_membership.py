@@ -319,7 +319,7 @@ def test_lookup_owner_and_grants_are_narrow(members: Members) -> None:
           WHERE n.nspname='arbiter' AND c.relrowsecurity AND c.relforcerowsecurity
         """)
             ).scalar_one()
-            == 5
+            == 10
         )
 
 

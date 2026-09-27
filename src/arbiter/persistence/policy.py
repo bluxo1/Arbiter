@@ -20,21 +20,23 @@ class PolicyRepository:
 
     def validate_aliases(self, aliases: tuple[str, ...]) -> None:
         connection = self._connection()
-        # Phase 3 must replace this fail-closed guard with consumption/occupancy checks.
-        if connection.execute(
-            text("""
-                SELECT to_regclass('arbiter.quota_windows') IS NOT NULL
-                    OR to_regclass('arbiter.budget_windows') IS NOT NULL
-                    OR to_regclass('arbiter.requests') IS NOT NULL
-            """)
-        ).scalar_one():
-            raise RuntimeError("accounting-aware policy updates required")
-        valid = connection.execute(
+        valid: bool = connection.execute(
             text("SELECT arbiter.lock_policy_aliases(CAST(:aliases AS text[]))"),
             {"aliases": list(aliases)},
         ).scalar_one()
         if valid is not True:
             raise ValueError("model alias unavailable")
+
+    def validate_limits(self, quota: int, budget: int, concurrency: int) -> None:
+        self._connection().execute(
+            text("SELECT arbiter.assert_policy_limits(:tenant,:quota,:budget,:concurrency)"),
+            {
+                "tenant": self._transaction.context.tenant_id,
+                "quota": quota,
+                "budget": budget,
+                "concurrency": concurrency,
+            },
+        )
 
     def advance_revision(self, previous: int, revision: int) -> None:
         tenant = self._transaction.context.tenant_id
