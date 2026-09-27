@@ -75,7 +75,7 @@ def postgres_foundation(engine: Engine) -> bool:
                 text("""
                 SELECT count(*) FILTER (WHERE policyname = 'tenant_ownership'
                     AND permissive = 'RESTRICTIVE' AND cmd = 'ALL'
-                    AND qual IS NOT NULL AND with_check IS NOT NULL) = 3
+                    AND qual IS NOT NULL AND with_check IS NOT NULL) = 4
                     AND count(*) FILTER (WHERE tablename = 'audit_events'
                     AND policyname = 'runtime_audit_actor' AND permissive = 'RESTRICTIVE'
                     AND cmd = 'INSERT' AND with_check IS NOT NULL) = 1

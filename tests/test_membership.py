@@ -117,6 +117,7 @@ def members() -> Iterator[Members]:
                     {"tenant": str(tenant)},
                 )
                 for query in (
+                    "DELETE FROM arbiter.api_keys WHERE tenant_id=:tenant",
                     "DELETE FROM arbiter.audit_events WHERE tenant_id=:tenant",
                     "DELETE FROM arbiter.memberships WHERE tenant_id=:tenant",
                     "DELETE FROM arbiter.tenants WHERE tenant_id=:tenant",
@@ -318,7 +319,7 @@ def test_lookup_owner_and_grants_are_narrow(members: Members) -> None:
           WHERE n.nspname='arbiter' AND c.relrowsecurity AND c.relforcerowsecurity
         """)
             ).scalar_one()
-            == 3
+            == 4
         )
 
 

@@ -7,6 +7,7 @@ from arbiter.config import DatabaseRole, DatabaseSettings
 
 ROLES: tuple[DatabaseRole, ...] = ("migration", "operator", "runtime")
 LOOKUP_ROLE = "arbiter_identity_lookup"
+KEY_ROLE = "arbiter_key_writer"
 
 
 def bootstrap(settings: DatabaseSettings) -> None:
@@ -37,7 +38,7 @@ def bootstrap(settings: DatabaseSettings) -> None:
                 "WHERE r.rolname = %s",
                 (name,),
             ).fetchall()
-            allowed = {LOOKUP_ROLE} if role == "migration" else set()
+            allowed = {LOOKUP_ROLE, KEY_ROLE} if role == "migration" else set()
             if any(row[0] not in allowed for row in memberships):
                 raise ValueError("unexpected database role membership")
             # Utility statements do not support bound password parameters. Literal quoting
@@ -72,6 +73,27 @@ def bootstrap(settings: DatabaseSettings) -> None:
         )
         connection.execute(
             "GRANT arbiter_identity_lookup TO arbiter_migration WITH INHERIT FALSE, SET TRUE"
+        )
+        if (
+            connection.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (KEY_ROLE,)).fetchone()
+            is None
+        ):
+            connection.execute("CREATE ROLE arbiter_key_writer")
+        if (
+            connection.execute(
+                "SELECT 1 FROM pg_auth_members WHERE member="
+                "(SELECT oid FROM pg_roles WHERE rolname=%s)",
+                (KEY_ROLE,),
+            ).fetchone()
+            is not None
+        ):
+            raise ValueError("unexpected key writer owner membership")
+        connection.execute(
+            "ALTER ROLE arbiter_key_writer WITH NOLOGIN NOSUPERUSER NOCREATEDB "
+            "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL"
+        )
+        connection.execute(
+            "GRANT arbiter_key_writer TO arbiter_migration WITH INHERIT FALSE, SET TRUE"
         )
         connection.execute(
             sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(sql.Identifier(settings.name))

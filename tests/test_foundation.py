@@ -17,6 +17,10 @@ def secret_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     key_file = directory / "audit_cursor_key"
     key_file.write_bytes(base64.b64encode(bytes(32)))
     monkeypatch.setenv("ARBITER_AUDIT_KEY_FILE", str(key_file))
+    pepper_file = directory / "api_key_pepper"
+    pepper_file.write_bytes(base64.b64encode(bytes(32)))
+    monkeypatch.setenv("ARBITER_KEYS_PEPPER_FILE", str(pepper_file))
+    monkeypatch.setenv("ARBITER_KEYS_PEPPER_VERSION", "1")
     monkeypatch.setenv("ARBITER_OIDC_ISSUER", "https://fixture.invalid/issuer")
     monkeypatch.setenv("ARBITER_OIDC_AUDIENCE", "arbiter-api")
     monkeypatch.setenv("ARBITER_OIDC_JWKS_URL", "https://fixture.invalid/keys")
@@ -80,6 +84,19 @@ def test_missing_cursor_secret_prevents_start(secret_directory: Path) -> None:
 def test_invalid_cursor_secret_prevents_start(secret_directory: Path) -> None:
     (secret_directory / "audit_cursor_key").write_text("invalid-base64")
     with pytest.raises(ValueError, match="invalid audit cursor key file"), TestClient(create_app()):
+        pass
+
+
+def test_missing_pepper_prevents_start(secret_directory: Path) -> None:
+    (secret_directory / "api_key_pepper").unlink()
+    with pytest.raises(FileNotFoundError), TestClient(create_app()):
+        pass
+
+
+@pytest.mark.parametrize("value", [b"invalid-base64", base64.b64encode(bytes(31)), b"x" * 129])
+def test_invalid_pepper_prevents_start(secret_directory: Path, value: bytes) -> None:
+    (secret_directory / "api_key_pepper").write_bytes(value)
+    with pytest.raises(ValueError, match="invalid API key pepper file"), TestClient(create_app()):
         pass
 
 

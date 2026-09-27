@@ -463,6 +463,7 @@ def test_policy_and_grant_catalog_matches_security_contract(store: Store) -> Non
         """)
         ).all()
         assert rows == [
+            ("api_keys", True, True, "arbiter_migration"),
             ("audit_events", True, True, "arbiter_migration"),
             ("memberships", True, True, "arbiter_migration"),
             ("principals", False, False, "arbiter_migration"),
@@ -475,7 +476,7 @@ def test_policy_and_grant_catalog_matches_security_contract(store: Store) -> Non
             WHERE table_schema='arbiter' AND column_name='tenant_id' AND is_nullable='NO'
         """)
             ).scalar_one()
-            == 3
+            == 4
         )
         assert (
             connection.execute(
@@ -485,7 +486,7 @@ def test_policy_and_grant_catalog_matches_security_contract(store: Store) -> Non
                 AND qual IS NOT NULL AND with_check IS NOT NULL
         """)
             ).scalar_one()
-            == 3
+            == 4
         )
         assert (
             connection.execute(

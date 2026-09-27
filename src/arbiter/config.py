@@ -12,6 +12,26 @@ from sqlalchemy import URL
 DatabaseRole = Literal["bootstrap", "migration", "operator", "runtime"]
 
 
+class KeySettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="ARBITER_KEYS_", frozen=True)
+
+    pepper_file: Path = Path("/run/secrets/api_key_pepper")
+    pepper_version: int = Field(default=1, ge=1, le=2147483647)
+
+    def pepper(self) -> bytes:
+        try:
+            with self.pepper_file.open("rb") as stream:
+                encoded = stream.read(129)
+            if len(encoded) > 128:
+                raise ValueError("oversized pepper file")
+            pepper = base64.b64decode(encoded.strip(), validate=True)
+            if len(pepper) != 32:
+                raise ValueError("invalid pepper length")
+            return pepper
+        except ValueError:
+            raise ValueError("invalid API key pepper file") from None
+
+
 class AuditSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ARBITER_AUDIT_", frozen=True)
 

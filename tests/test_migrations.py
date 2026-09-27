@@ -89,7 +89,14 @@ def migrate_to(engine: Engine, revision: str, *, downgrade: bool = False) -> Non
 
 
 @pytest.mark.parametrize(
-    "previous", [None, "0001_foundation", "0002_tenant_isolation", "0003_operator_audit"]
+    "previous",
+    [
+        None,
+        "0001_foundation",
+        "0002_tenant_isolation",
+        "0003_operator_audit",
+        "0004_identity_lookup",
+    ],
 )
 def test_migration_empty_and_previous_then_repeat_and_round_trip(
     disposable_database: Engine, previous: str | None
@@ -106,13 +113,13 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
     with engine.begin() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
-            == "0004_identity_lookup"
+            == "0005_api_key_creation"
         )
         assert (
             connection.execute(
                 text("SELECT count(*) FROM pg_tables WHERE schemaname='arbiter'")
             ).scalar_one()
-            == 4
+            == 5
         )
         assert (
             connection.execute(
@@ -121,7 +128,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
             WHERE n.nspname='arbiter' AND c.relrowsecurity AND c.relforcerowsecurity
         """)
             ).scalar_one()
-            == 3
+            == 4
         )
         assert (
             connection.execute(
@@ -147,7 +154,9 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
     migrate_to(engine, "head")
 
 
-@pytest.mark.parametrize("previous", ["0002_tenant_isolation", "0003_operator_audit"])
+@pytest.mark.parametrize(
+    "previous", ["0002_tenant_isolation", "0003_operator_audit", "0004_identity_lookup"]
+)
 def test_upgrade_preserves_existing_tenant_and_audit(
     disposable_database: Engine,
     previous: str,

@@ -26,10 +26,11 @@ services:
       ARBITER_OIDC_AUDIENCE: ${ARBITER_OIDC_AUDIENCE:-arbiter-api}
       ARBITER_OIDC_JWKS_URL: ${ARBITER_OIDC_JWKS_URL:-https://arbiter-p0-keycloak:8443/realms/arbiter/protocol/openid-connect/certs}
       ARBITER_OIDC_CA_FILE: /run/config/oidc-ca.pem
+      ARBITER_KEYS_PEPPER_VERSION: ${ARBITER_KEYS_PEPPER_VERSION:-1}
     configs:
       - source: oidc_ca
         target: /run/config/oidc-ca.pem
-    secrets: [db_runtime_password, audit_cursor_key]
+    secrets: [db_runtime_password, audit_cursor_key, api_key_pepper]
     ports: ["127.0.0.1:${ARBITER_API_PORT:-8000}:8000"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -168,6 +169,8 @@ volumes:
       device: ${ARBITER_DATA_LINUX_ROOT:?Set the Linux-visible Arbiter data root}/ollama/models
 
 secrets:
+  api_key_pepper:
+    file: ${ARBITER_SECRETS_DIR:?Set the protected secret directory}/api_key_pepper
   audit_cursor_key:
     file: ${ARBITER_SECRETS_DIR:?Set the protected secret directory}/audit_cursor_key
   db_bootstrap_password:

@@ -40,7 +40,7 @@ foreach ($verifiedRule in $verifiedAcl.Access) {
 foreach ($directory in @('postgres', 'redis', 'ollama\models', 'tmp', 'phase1')) {
     New-Item -ItemType Directory -Force -Path (Join-Path $resolvedRoot $directory) | Out-Null
 }
-foreach ($secretName in @('db_bootstrap_password', 'db_migration_password', 'db_operator_password', 'db_runtime_password', 'audit_cursor_key')) {
+foreach ($secretName in @('db_bootstrap_password', 'db_migration_password', 'db_operator_password', 'db_runtime_password', 'audit_cursor_key', 'api_key_pepper')) {
     $secretPath = Join-Path $secretDirectory $secretName
     if (Test-Path -LiteralPath $secretPath) {
         foreach ($fileRule in (Get-Acl -LiteralPath $secretPath).Access) {
@@ -51,7 +51,7 @@ foreach ($secretName in @('db_bootstrap_password', 'db_migration_password', 'db_
         }
         continue
     }
-    $byteCount = if ($secretName -eq 'audit_cursor_key') { 32 } else { 48 }
+    $byteCount = if ($secretName -in @('audit_cursor_key', 'api_key_pepper')) { 32 } else { 48 }
     $randomBytes = New-Object byte[] $byteCount
     $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
     try { $generator.GetBytes($randomBytes) } finally { $generator.Dispose() }
@@ -59,4 +59,4 @@ foreach ($secretName in @('db_bootstrap_password', 'db_migration_password', 'db_
     $writer = New-Object System.IO.StreamWriter($stream)
     try { $writer.Write([Convert]::ToBase64String($randomBytes)) } finally { $writer.Dispose() }
 }
-Write-Output 'Arbiter directories, separate database secrets and audit cursor key prepared; existing values retained.'
+Write-Output 'Arbiter directories and separate database/cursor/pepper secrets prepared; existing values retained.'

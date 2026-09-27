@@ -1,10 +1,10 @@
 # Arbiter
 
-Phase 1 foundation and bounded Phase 2 identity/audit access. Read
+Phase 1 foundation and bounded Phase 2 identity, audit access and key creation. Read
 [the agent workflow](docs/Agents.md) and [project memory](docs/Memory.md) before changes.
-The API exposes health and authenticated tenant audit reads. Liveness returns 200;
+The API exposes health, authenticated tenant audit reads and admin key creation. Liveness returns 200;
 readiness deliberately returns 503 until all required security gates exist.
-Inference and API keys remain unavailable; Phase 2 is incomplete.
+Inference and API key authentication remain unavailable; Phase 2 is incomplete.
 
 On the validated Windows/WSL2 host, prepare private files on D: and load public paths:
 
@@ -22,7 +22,7 @@ docker compose up -d --wait api ollama
 
 Secret preparation retains existing values. Bootstrap is an explicit, privileged
 local command; it is not part of API startup. Migrations use their own credential.
-The API receives only its runtime password and separate audit cursor key files.
+The API receives only its runtime password, audit cursor key and API key pepper files.
 Keep secret values outside Git;
 `.env.example` contains public paths only. Local Compose secrets are file mounts,
 so protect their host directory as well as restricting per-service mounts.
@@ -148,7 +148,7 @@ verify retained data and credentials. See project memory for the actual closure
 evidence and Phase 1 assessment. Inference remains unavailable.
 
 OIDC verification and membership authorization back the audit-list endpoint.
-Key management, other metadata endpoints, admission and inference are unavailable.
+Key listing/revocation, other metadata endpoints, admission and inference are unavailable.
 `OidcVerifier` is an async context manager with bounded HTTPS JWKS retrieval,
 RS256-only signature checks, exact issuer/audience checks, required `exp/iss/sub/aud`
 and validation of optional `nbf/iat`. Clock skew is configurable from 0 to 60
@@ -218,3 +218,42 @@ Only API mounts it. Missing/invalid cursor key or OIDC configuration prevents
 startup; startup performs no schema mutation or JWKS request. HTTPS/DB clients
 are disposed during shutdown and file/certificate/database work stays outside
 the event loop. Approved behavior contracts remain in [Design.md](docs/Design.md).
+
+`POST /v1/tenants/{tenant_id}/keys` requires a verified OIDC token and an active
+database admin membership. The strict JSON body accepts `label` (1–64 printable
+ASCII characters, nonblank), `scopes` (a nonempty, duplicate-free subset of
+`inference:write` and `usage:read`), and optional `expires_at` (an aware timestamp).
+Omitting expiration gives 30 days; explicit expiration must be in the future and
+within 90 days, measured by PostgreSQL after acquiring the tenant lock. Unknown
+fields, duplicate JSON fields and query parameters are rejected; bodies are
+limited to 64 KiB before parsing. JWT tenant/role claims cannot grant permission.
+
+The 201 response contains `id`, `public_id`, `label`, `scopes`, `created_at`,
+`expires_at`, `api_key` and a correlation `request_id`, with `Cache-Control: no-store`.
+The credential format is `arb1.<32-character public identifier>.<43-character
+base64url secret>`; the secret contains 32 random bytes. Store the returned
+credential securely at the caller. It cannot be retrieved or replayed after a
+lost response. Repeated valid POSTs create distinct keys; creation has no
+idempotency contract. Neither listing/revocation nor workload key authentication
+is implemented in this bounded task. Creating a key does not enable inference.
+
+Preparation provisions an independent base64-encoded 32-byte `api_key_pepper`
+file and preserves it on repetition. Missing/invalid pepper prevents startup.
+`ARBITER_KEYS_PEPPER_VERSION` defaults to 1; rotation requires reissuing affected
+keys under Design.md. The verifier is HMAC-SHA-256 over the domain separator
+`arbiter/api-key/v1` followed by a zero byte, public identifier, zero byte and raw
+secret. Only the 32-byte verifier and pepper version reach persistence; the pepper
+and plaintext credential are never written to the database or audit records.
+
+Repeat bootstrap before migration `0005_api_key_creation`. It creates a separate
+NOLOGIN/NOSUPERUSER/NOBYPASSRLS key-writer owner; runtime/operator cannot assume
+that role. The fixed-search-path creation function requires matching transaction
+context, locks the tenant and rechecks active admin membership before mutation.
+It inserts the key and content-free member audit in one transaction. A deferred
+composite foreign key also requires a matching audit ID, key target, actor and
+tenant at commit. Runtime has scoped metadata-column SELECT and narrowly granted
+function execution, with no direct key INSERT/UPDATE/DELETE or verifier reads.
+The writer's tenant `UPDATE(status)` grant is required for `FOR UPDATE`; its
+NOLOGIN role has no runtime membership or schema CREATE. FORCE RLS applies to
+keys and all other tenant tables. Key metadata is immutable except the reserved
+revocation timestamp; no revocation operation is exposed yet.
