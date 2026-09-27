@@ -58,16 +58,18 @@ def postgres_foundation(engine: Engine) -> bool:
                 return False
             schema: bool | None = connection.execute(
                 text("""
-                SELECT count(*) = 3 AND bool_and(
+                SELECT count(*) = 4 AND bool_and(
                     c.relrowsecurity AND c.relforcerowsecurity AND a.attnotnull
                     AND pg_get_userbyid(c.relowner) = 'arbiter_migration'
                     AND has_table_privilege(current_user, c.oid, 'SELECT')
                     AND NOT has_table_privilege(current_user, c.oid, 'TRUNCATE')
+                    AND (c.relname <> 'tenant_policies' OR
+                        NOT has_table_privilege(current_user,c.oid,'INSERT,UPDATE,DELETE'))
                 )
                 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                 JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = 'tenant_id'
                 WHERE n.nspname = 'arbiter'
-                    AND c.relname IN ('tenants', 'memberships', 'audit_events')
+                    AND c.relname IN ('tenants', 'memberships', 'audit_events', 'tenant_policies')
                     AND c.relkind = 'r' AND NOT a.attisdropped
             """)
             ).scalar_one()
@@ -75,7 +77,7 @@ def postgres_foundation(engine: Engine) -> bool:
                 text("""
                 SELECT count(*) FILTER (WHERE policyname = 'tenant_ownership'
                     AND permissive = 'RESTRICTIVE' AND cmd = 'ALL'
-                    AND qual IS NOT NULL AND with_check IS NOT NULL) = 4
+                    AND qual IS NOT NULL AND with_check IS NOT NULL) = 5
                     AND count(*) FILTER (WHERE tablename = 'audit_events'
                     AND policyname = 'runtime_audit_actor' AND permissive = 'RESTRICTIVE'
                     AND cmd = 'INSERT' AND with_check IS NOT NULL) = 1

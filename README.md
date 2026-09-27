@@ -334,3 +334,41 @@ production. Existing management routes continue to require OIDC membership/admin
 authorization. Workload model/usage/request endpoints require their own bounded
 implementation. Verified workload identity is not dispatch authority; future
 durable admission must recheck tenant/key status under the documented lock order.
+
+Local tenant-policy administration uses the existing separately credentialed
+Compose operator command after migration `0008_tenant_policies`:
+
+```powershell
+docker compose --profile operations run --rm operator set-tenant-policy `
+  --tenant <tenant-uuid> --tenant-rate 60 --key-rate 30 --daily-quota 1000 `
+  --monthly-budget 10000 --concurrency 1
+```
+
+All five limits are explicit on the CLI; updates replace the complete policy.
+Repeat `--model-alias <public-alias>` to approve registered models, or omit it
+to approve none. Aliases are 1–64 lowercase ASCII letters/digits/underscore/hyphen,
+starting with a letter, unique and bounded to 32. Native model names, URLs and
+unregistered/inactive aliases deny. This migration creates only the minimal global
+registry schema needed for validation; it registers no model and grants no operator
+registry write privilege. Verified registration is a separate bounded task.
+
+Limits accept zero and checked nonnegative signed 64-bit integers. Concurrency is
+restricted to 0–2, the current measured deployment capacity recorded in Memory.md;
+raising that ceiling requires a reviewed deployment-capacity change. It is not a
+new measurement or an admission implementation. Tenant administrators have no
+policy route or database mutation grant, and runtime has no operator credential.
+
+Each accepted call, including repeated identical values, creates an immutable
+tenant-owned policy revision and content-free operator audit in one transaction.
+The first provision advances the tenant's existing revision 1 to 2; later updates
+advance by one under the tenant lock. A deferred composite foreign key binds each
+policy to its exact tenant, policy object, revision and successful operator event.
+Errors roll back policy, audit and tenant revision; output contains only IDs and
+revision after commit. ENABLE/FORCE RLS protects history; runtime may read only
+within established tenant context and cannot insert/update/delete policy records.
+
+No consumption/in-flight records or dispatch path exists yet. The local policy
+path fails closed if future accounting/request tables appear, until Phase 3 adds
+the documented locked consumption/occupancy checks. This prevents carrying a
+pre-admission updater forward as permission to lower limits beneath live usage.
+No quota/budget/rate enforcement, provider call or inference is enabled here.

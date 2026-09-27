@@ -13,6 +13,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
 from arbiter.config import DatabaseSettings
+from arbiter.operations.policy import PolicyInput, PolicyService
 from arbiter.persistence.operator import OperatorRepository, operator_engine, operator_transaction
 
 TenantStatus = Literal["active", "suspended"]
@@ -156,6 +157,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     member_parser.add_argument("--issuer", required=True)
     member_parser.add_argument("--subject", required=True)
     member_parser.add_argument("--role", choices=("member", "admin"), default="member")
+    policy_parser = commands.add_parser("set-tenant-policy")
+    policy_parser.add_argument("--tenant", required=True, type=UUID)
+    policy_parser.add_argument("--tenant-rate", type=int, required=True)
+    policy_parser.add_argument("--key-rate", type=int, required=True)
+    policy_parser.add_argument("--daily-quota", type=int, required=True)
+    policy_parser.add_argument("--monthly-budget", type=int, required=True)
+    policy_parser.add_argument("--concurrency", type=int, required=True)
+    policy_parser.add_argument("--model-alias", action="append", default=[])
     engine: Engine | None = None
     try:
         args = parser.parse_args(argv)
@@ -164,16 +173,34 @@ def main(argv: Sequence[str] | None = None) -> None:
             if args.command == "create-member"
             else None
         )
+        policy = (
+            PolicyInput(
+                args.tenant_rate,
+                args.key_rate,
+                args.daily_quota,
+                args.monthly_budget,
+                args.concurrency,
+                tuple(args.model_alias),
+            )
+            if args.command == "set-tenant-policy"
+            else None
+        )
         engine = operator_engine(DatabaseSettings())
         service = ProvisioningService(engine)
         if args.command == "create-tenant":
             result = service.create_tenant()
         elif args.command == "set-tenant-status":
             result = service.set_tenant_status(args.tenant, args.status)
-        else:
+        elif args.command == "create-member":
             if member is None:
                 raise ValueError("member binding required")
             result = service.create_member(args.tenant, member)
+        else:
+            if policy is None:
+                raise ValueError("validated policy required")
+            policy_result = PolicyService(engine).set_policy(args.tenant, policy)
+            print(json.dumps(asdict(policy_result), default=str))
+            return
         print(json.dumps(asdict(result), default=str))
     except Exception as error:
         # Never expose subject, input values, SQL/driver bodies or credential details.
