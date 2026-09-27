@@ -17,6 +17,7 @@ from arbiter.identity.keys import KeyIssuer
 from arbiter.identity.oidc import OidcVerifier
 from arbiter.operations.audit import AuditService
 from arbiter.operations.key_listing import KeyListService
+from arbiter.operations.key_revocation import KeyRevocationService
 from arbiter.operations.keys import KeyService
 from arbiter.persistence.tenant import runtime_engine
 from arbiter.transport.audit import router as audit_router
@@ -51,15 +52,20 @@ def create_app(
     audit_service: AuditService | None = None,
     key_service: KeyService | None = None,
     key_list_service: KeyListService | None = None,
+    key_revocation_service: KeyRevocationService | None = None,
 ) -> FastAPI:
     """Optional explicit service wiring is for host-side tests, never request input."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        if audit_service is not None or key_service is not None or key_list_service is not None:
+        if any(
+            service is not None
+            for service in (audit_service, key_service, key_list_service, key_revocation_service)
+        ):
             app.state.audit_service = audit_service
             app.state.key_service = key_service
             app.state.key_list_service = key_list_service
+            app.state.key_revocation_service = key_revocation_service
             yield
             return
         engine, settings, trust, cursors, issuer, key_cursors = await to_thread.run_sync(_resources)
@@ -69,6 +75,7 @@ def create_app(
                 app.state.audit_service = AuditService(access, cursors)
                 app.state.key_service = KeyService(access, issuer)
                 app.state.key_list_service = KeyListService(access, key_cursors)
+                app.state.key_revocation_service = KeyRevocationService(access)
                 yield
         finally:
             await to_thread.run_sync(engine.dispose)
@@ -78,6 +85,8 @@ def create_app(
                 del app.state.key_service
             if hasattr(app.state, "key_list_service"):
                 del app.state.key_list_service
+            if hasattr(app.state, "key_revocation_service"):
+                del app.state.key_revocation_service
 
     app = FastAPI(debug=False, docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.include_router(health_router)

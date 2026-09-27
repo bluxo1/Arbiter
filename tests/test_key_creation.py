@@ -29,6 +29,7 @@ from arbiter.identity.keys import KeyIssuer
 from arbiter.main import create_app
 from arbiter.operations.audit import AuditService
 from arbiter.operations.key_listing import KeyListService
+from arbiter.operations.key_revocation import KeyRevocationService
 from arbiter.operations.keys import KeyService
 from arbiter.persistence.operator import OperatorRepository, operator_transaction
 
@@ -57,6 +58,7 @@ async def client(members: Members, pepper: bytes) -> AsyncIterator[httpx.AsyncCl
             audit_service=AuditService(access, AuditCursor(secrets.token_bytes(32))),
             key_service=KeyService(access, KeyIssuer(pepper, 3)),
             key_list_service=KeyListService(access, KeyCursor(secrets.token_bytes(32))),
+            key_revocation_service=KeyRevocationService(access),
         )
         async with (
             app.router.lifespan_context(app),
@@ -163,7 +165,7 @@ async def test_success_returns_only_once_and_persists_hmac_with_matching_audit(
             f"{path(members.tenant_b)}/{row.id}/revoke",
             headers=auth(members.token(subject=members.subject_b)),
         )
-    ).status_code == 404
+    ).status_code == 200
     assert (
         await client.post("/v1/chat/completions", headers=auth(value), json={})
     ).status_code == 404

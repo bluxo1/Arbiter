@@ -26,6 +26,7 @@ from arbiter.identity.keys import KeyIssuer
 from arbiter.main import create_app
 from arbiter.operations.audit import AuditService
 from arbiter.operations.key_listing import KeyListService
+from arbiter.operations.key_revocation import KeyRevocationService
 from arbiter.operations.keys import KeyService
 from arbiter.operations.provision import MemberInput, ProvisioningService
 from arbiter.persistence.keys import KeyRepository
@@ -57,6 +58,7 @@ async def client(members: Members, cursor_key: bytes) -> AsyncIterator[httpx.Asy
             audit_service=AuditService(access, AuditCursor(cursor_key)),
             key_service=KeyService(access, KeyIssuer(secrets.token_bytes(32), 1)),
             key_list_service=KeyListService(access, KeyCursor(cursor_key)),
+            key_revocation_service=KeyRevocationService(access),
         )
         async with (
             app.router.lifespan_context(app),

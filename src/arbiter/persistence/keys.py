@@ -1,4 +1,4 @@
-"""Scoped metadata reads and audited creation; no general key writes or secret reads."""
+"""Scoped metadata reads and audited key mutations; no general writes or secret reads."""
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -32,6 +32,32 @@ class KeyMetadataRecord:
 class KeyRepository:
     def __init__(self, transaction: TenantTransaction) -> None:
         self._transaction = transaction
+
+    def revoke(
+        self, member: AuthorizedMember, key_id: UUID, *, audit_id: UUID, request_id: UUID
+    ) -> datetime:
+        tenant = self._transaction.context.tenant_id
+        if member.binding.tenant_id != tenant:
+            raise ValueError("inaccessible key actor")
+        revoked: datetime = (
+            self._transaction.connection()
+            .execute(
+                text("""
+                SELECT revoked_at FROM arbiter.revoke_api_key(
+                    :tenant,:actor,:principal,:key,:audit,:request)
+            """),
+                {
+                    "tenant": tenant,
+                    "actor": member.binding.membership_id,
+                    "principal": member.binding.principal_id,
+                    "key": key_id,
+                    "audit": audit_id,
+                    "request": request_id,
+                },
+            )
+            .scalar_one()
+        )
+        return revoked
 
     def list_page(self, *, page_size: int, after: UUID | None) -> list[KeyMetadataRecord]:
         if not 1 <= page_size <= 100:

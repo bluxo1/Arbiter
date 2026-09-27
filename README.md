@@ -2,7 +2,7 @@
 
 Phase 1 foundation and bounded Phase 2 identity, audit access and key administration. Read
 [the agent workflow](docs/Agents.md) and [project memory](docs/Memory.md) before changes.
-The API exposes health, authenticated tenant audit reads and admin key creation/listing. Liveness returns 200;
+The API exposes health, authenticated tenant audit reads and admin key creation/listing/revocation. Liveness returns 200;
 readiness deliberately returns 503 until all required security gates exist.
 Inference and API key authentication remain unavailable; Phase 2 is incomplete.
 
@@ -234,8 +234,8 @@ The credential format is `arb1.<32-character public identifier>.<43-character
 base64url secret>`; the secret contains 32 random bytes. Store the returned
 credential securely at the caller. It cannot be retrieved or replayed after a
 lost response. Repeated valid POSTs create distinct keys; creation has no
-idempotency contract. Neither revocation nor workload key authentication
-is implemented in this bounded task. Creating a key does not enable inference.
+idempotency contract. Workload key authentication is not implemented yet.
+Creating a key does not enable inference.
 
 Preparation provisions an independent base64-encoded 32-byte `api_key_pepper`
 file and preserves it on repetition. Missing/invalid pepper prevents startup.
@@ -255,15 +255,15 @@ tenant at commit. Runtime has scoped metadata-column SELECT and narrowly granted
 function execution, with no direct key INSERT/UPDATE/DELETE or verifier reads.
 The writer's tenant `UPDATE(status)` grant is required for `FOR UPDATE`; its
 NOLOGIN role has no runtime membership or schema CREATE. FORCE RLS applies to
-keys and all other tenant tables. Key metadata is immutable except the reserved
-revocation timestamp; no revocation operation is exposed yet.
+keys and all other tenant tables. Key metadata is immutable; revocation can only
+set a previously null timestamp, which cannot later be cleared or changed.
 
 `GET /v1/tenants/{tenant_id}/keys` requires verified OIDC identity and an active
 database admin membership. It returns `{"data": [...], "next_cursor": null-or-string}`
 with only `id`, `public_id`, `label`, `scopes`, `created_at`, `expires_at` and
 `revoked_at` per key. It includes expired and revoked metadata without enabling
 those credentials. It never queries verifiers or pepper versions and never issues,
-returns or reconstructs secrets. No key-detail or revocation route is exposed.
+returns or reconstructs secrets. No key-detail route is exposed.
 
 Query parameters are `page_size` (default 50, range 1–100) and optional `cursor`.
 Duplicate/unknown parameters are rejected after identity/membership/admin checks.
@@ -279,3 +279,25 @@ tenants both return generic 404; insufficient admin permission returns 403;
 invalid cursors/queries return sanitized 422; unavailable dependencies return 503.
 Successful and error responses carry `Cache-Control: no-store`. This read-only task
 changes no schema, grants, RLS policy, secret provisioning or approved specification.
+
+`POST /v1/tenants/{tenant_id}/keys/{key_id}/revoke` requires verified OIDC identity
+and active database admin membership. It accepts no body or query options and
+returns 200 with only `id` and `revoked_at`, with `Cache-Control: no-store`.
+Repeated calls preserve the original revocation timestamp and append no duplicate
+mutation event. Expired keys can also be revoked. Inaccessible/absent tenant or
+key selectors share generic 404; non-admin members receive 403. Malformed input
+receives sanitized 422; dependency or audit failures receive sanitized 503.
+
+Migration `0006_api_key_revocation` grants runtime only EXECUTE on the scoped
+revocation function. Runtime still cannot directly update keys or read verifiers.
+The NOLOGIN key-writer owner receives only the additional metadata SELECT and
+`UPDATE(revoked_at)` privileges needed by that function, under FORCE RLS. Its
+fixed-search-path function requires matching context and locks the tenant before
+the key, rechecking active tenant/admin membership after acquiring the tenant
+lock. The timestamp and content-free `api_key_revoked` event commit together;
+an audit failure rolls back the mutation. The response is produced after commit.
+
+This establishes durable revocation and the lock order required of future
+dispatch checks. Workload key resolution and dispatch authorization are absent,
+so their revocation denial/race gates remain unproven. No positive authorization
+cache, workload endpoint, provider call or inference path is introduced.

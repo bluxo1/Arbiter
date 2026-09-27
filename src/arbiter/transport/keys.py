@@ -1,4 +1,4 @@
-"""Key creation and metadata listing only; no verification or revocation route."""
+"""OIDC-admin key administration; no workload verification or inference route."""
 
 from typing import Literal
 from uuid import UUID
@@ -13,6 +13,7 @@ from arbiter.identity.access import InsufficientRole, MembershipUnavailable
 from arbiter.identity.key_cursor import InvalidKeyQuery
 from arbiter.identity.oidc import IdentityUnavailable, InvalidIdentity
 from arbiter.operations.key_listing import KeyListService
+from arbiter.operations.key_revocation import KeyRevocationService
 from arbiter.operations.keys import InvalidKeyRequest, KeyCreationConflict, KeyService
 from arbiter.persistence.identity import InaccessibleTenant
 from arbiter.transport.errors import error_response
@@ -59,6 +60,56 @@ class KeyListResponse(BaseModel):
 
     data: tuple[KeyMetadata, ...]
     next_cursor: str | None
+
+
+class KeyRevocationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    id: UUID
+    revoked_at: AwareDatetime
+
+
+@router.post("/v1/tenants/{tenant_id}/keys/{key_id}/revoke", response_model=KeyRevocationResponse)
+async def revoke_key(tenant_id: str, key_id: str, request: Request) -> JSONResponse:
+    try:
+        token = management_bearer(request)
+        try:
+            selector = UUID(tenant_id)
+        except ValueError:
+            raise InvalidKeyRequest() from None
+        service: KeyRevocationService | None = getattr(
+            request.app.state, "key_revocation_service", None
+        )
+        if service is None:
+            raise MembershipUnavailable()
+        # This operation has no body or options. Read at most one nonempty chunk.
+        invalid_input = bool(request.query_params) or any(
+            name.lower() == b"content-encoding" for name, _ in request.scope["headers"]
+        )
+        with fail_after(5):
+            async for chunk in request.stream():
+                if chunk:
+                    invalid_input = True
+                    break
+        identifier, revoked_at = await service.revoke(
+            token, selector, key_id, invalid_input=invalid_input
+        )
+        response = KeyRevocationResponse(id=identifier, revoked_at=revoked_at)
+        return JSONResponse(
+            content=response.model_dump(mode="json"), headers={"Cache-Control": "no-store"}
+        )
+    except InvalidIdentity:
+        return error_response(401, "invalid_credentials", "Invalid credentials")
+    except InaccessibleTenant:
+        return error_response(404, "not_found", "Resource not found")
+    except InsufficientRole:
+        return error_response(403, "permission_denied", "Permission denied")
+    except InvalidKeyRequest:
+        return error_response(422, "invalid_fields", "Invalid key request")
+    except (IdentityUnavailable, MembershipUnavailable, TimeoutError):
+        return error_response(503, "unavailable", "Service unavailable")
+    except ClientDisconnect:
+        return error_response(422, "invalid_fields", "Invalid key request")
 
 
 @router.get("/v1/tenants/{tenant_id}/keys", response_model=KeyListResponse)

@@ -96,6 +96,7 @@ def migrate_to(engine: Engine, revision: str, *, downgrade: bool = False) -> Non
         "0002_tenant_isolation",
         "0003_operator_audit",
         "0004_identity_lookup",
+        "0005_api_key_creation",
     ],
 )
 def test_migration_empty_and_previous_then_repeat_and_round_trip(
@@ -107,13 +108,19 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
         with engine.begin() as connection:
             assert connection.execute(
                 text("SELECT count(*) FROM pg_tables WHERE schemaname='arbiter'")
-            ).scalar_one() == (0 if previous == "0001_foundation" else 4)
+            ).scalar_one() == (
+                0
+                if previous == "0001_foundation"
+                else 5
+                if previous == "0005_api_key_creation"
+                else 4
+            )
     migrate_to(engine, "head")
     migrate_to(engine, "head")
     with engine.begin() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
-            == "0005_api_key_creation"
+            == "0006_api_key_revocation"
         )
         assert (
             connection.execute(
@@ -155,7 +162,13 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
 
 
 @pytest.mark.parametrize(
-    "previous", ["0002_tenant_isolation", "0003_operator_audit", "0004_identity_lookup"]
+    "previous",
+    [
+        "0002_tenant_isolation",
+        "0003_operator_audit",
+        "0004_identity_lookup",
+        "0005_api_key_creation",
+    ],
 )
 def test_upgrade_preserves_existing_tenant_and_audit(
     disposable_database: Engine,
@@ -197,3 +210,84 @@ def test_upgrade_preserves_existing_tenant_and_audit(
         """),
             {"tenant": tenant},
         ).one() == (event, "operator", "tenant_suspended", tenant)
+
+
+def test_revocation_upgrade_and_downgrade_preserve_existing_key_state(
+    disposable_database: Engine,
+) -> None:
+    engine = disposable_database
+    tenant, principal, member, key, audit = (uuid4() for _ in range(5))
+    migrate_to(engine, "0005_api_key_creation")
+    with engine.begin() as connection:
+        connection.execute(
+            text("SELECT set_config('arbiter.tenant_id',:tenant,true)"), {"tenant": str(tenant)}
+        )
+        connection.execute(text("INSERT INTO arbiter.tenants (id) VALUES (:id)"), {"id": tenant})
+        connection.execute(
+            text(
+                "INSERT INTO arbiter.principals (id,issuer,subject) "
+                "VALUES (:id,'https://fixture.invalid','migration-preservation')"
+            ),
+            {"id": principal},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO arbiter.memberships (id,tenant_id,principal_id,role) "
+                "VALUES (:id,:tenant,:principal,'admin')"
+            ),
+            {"id": member, "tenant": tenant, "principal": principal},
+        )
+        connection.execute(
+            text("""
+                INSERT INTO arbiter.audit_events (id,tenant_id,actor_type,actor_reference,
+                    actor_membership_id,action,target_id,policy_revision,outcome)
+                VALUES (:audit,:tenant,'member',:reference,:member,'api_key_created',
+                        :key,1,'succeeded')
+            """),
+            {
+                "audit": audit,
+                "tenant": tenant,
+                "reference": str(member),
+                "member": member,
+                "key": key,
+            },
+        )
+        connection.execute(
+            text("""
+                INSERT INTO arbiter.api_keys (id,tenant_id,public_id,label,verifier,pepper_version,
+                    scopes,created_at,expires_at,revoked_at,created_by_membership_id,creation_audit_id)
+                VALUES (:key,:tenant,:public,'preserved',decode(repeat('ab',32),'hex'),1,
+                    ARRAY['usage:read'],now()-interval '60 days',now()-interval '30 days',
+                    now()-interval '40 days',:member,:audit)
+            """),
+            {"key": key, "tenant": tenant, "public": key.hex, "member": member, "audit": audit},
+        )
+        before = connection.execute(
+            text("SELECT * FROM arbiter.api_keys WHERE tenant_id=:tenant"), {"tenant": tenant}
+        ).one()
+    for revision, downgrade in (("head", False), ("0005_api_key_creation", True), ("head", False)):
+        migrate_to(engine, revision, downgrade=downgrade)
+        with engine.begin() as connection:
+            connection.execute(
+                text("SELECT set_config('arbiter.tenant_id',:tenant,true)"), {"tenant": str(tenant)}
+            )
+            assert (
+                connection.execute(
+                    text("SELECT * FROM arbiter.api_keys WHERE tenant_id=:tenant"),
+                    {"tenant": tenant},
+                ).one()
+                == before
+            )
+            assert connection.execute(
+                text("SELECT action,target_id FROM arbiter.audit_events WHERE tenant_id=:tenant"),
+                {"tenant": tenant},
+            ).one() == ("api_key_created", key)
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT has_column_privilege('arbiter_runtime',"
+                        "'arbiter.api_keys','revoked_at','UPDATE')"
+                    )
+                ).scalar_one()
+                is False
+            )
