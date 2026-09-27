@@ -5,6 +5,7 @@ it does not enforce Redis rate, obtain provider capacity or authorize dispatch.
 Success is returned only after the transaction and deferred constraints commit.
 """
 
+from dataclasses import dataclass
 from uuid import UUID
 
 from pydantic import SecretStr
@@ -24,7 +25,7 @@ from arbiter.identity.workload import MissingScope
 from arbiter.persistence.models import ModelRepository
 from arbiter.persistence.reservation import ReservationRepository, ReservationResult
 from arbiter.persistence.tenant import bind_tenant_transaction
-from arbiter.persistence.workload import resolve_key
+from arbiter.persistence.workload import KeyBinding, resolve_key
 
 
 class ReservationDenied(Exception):
@@ -69,6 +70,14 @@ class ReservationUnavailable(Exception):
         super().__init__("reservation unavailable")
 
 
+@dataclass(frozen=True, slots=True)
+class ReservedBinding:
+    """Internal receipt after a committed reservation; never an HTTP response."""
+
+    result: ReservationResult
+    binding: KeyBinding
+
+
 def _database_error(error: DBAPIError) -> Exception:
     code = getattr(error.orig, "sqlstate", None)
     if code == "AR001":
@@ -102,6 +111,14 @@ class ReservationService:
         idempotency: str,
         request: ReservationInput,
     ) -> ReservationResult:
+        return self.reserve_for_capacity(credential, idempotency, request).result
+
+    def reserve_for_capacity(
+        self,
+        credential: SecretStr,
+        idempotency: str,
+        request: ReservationInput,
+    ) -> ReservedBinding:
         validate_idempotency(idempotency)
         fingerprint = self._fingerprinter.compute(request)
         candidate = self._verifier.candidate(credential)
@@ -138,7 +155,7 @@ class ReservationService:
                 )
                 if result.duplicate:
                     raise RequestAlreadyAdmitted(result.request_id, result.state)
-            return result
+            return ReservedBinding(result, binding)
         except DBAPIError as error:
             raise _database_error(error) from None
         except (SQLAlchemyError, RuntimeError):
