@@ -1,4 +1,4 @@
-"""Reusable workload request boundary; no workload data or inference route is added."""
+"""Reusable workload authentication boundary; verification is not dispatch authority."""
 
 from collections.abc import Callable
 

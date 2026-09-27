@@ -597,8 +597,11 @@ async def test_secret_verifier_absence_and_workload_routes_remain_unavailable(
         401,
         "invalid_credentials",
     )
-    for path in ("/v1/chat/completions", "/v1/models", "/v1/usage"):
+    for path in ("/v1/chat/completions", "/v1/usage"):
         assert (await client.post(path, headers=auth(data["api_key"]), json={})).status_code == 404
+    assert (
+        await client.post("/v1/models", headers=auth(data["api_key"]), json={})
+    ).status_code == 405
 
 
 async def test_one_connection_pool_clears_context_across_tenants_and_discards_poison(

@@ -1,4 +1,4 @@
-"""Composition root: health, audit and key administration; no inference."""
+"""Composition root: health, administration and scoped catalogs; no inference."""
 
 import os
 import ssl
@@ -14,20 +14,30 @@ from arbiter.identity.access import ManagementAccess
 from arbiter.identity.audit_cursor import AuditCursor
 from arbiter.identity.key_cursor import KeyCursor
 from arbiter.identity.keys import KeyIssuer, KeyVerifier
+from arbiter.identity.model_cursor import ModelCursor
 from arbiter.identity.oidc import OidcVerifier
 from arbiter.identity.workload import WorkloadAccess
 from arbiter.operations.audit import AuditService
 from arbiter.operations.key_listing import KeyListService
 from arbiter.operations.key_revocation import KeyRevocationService
 from arbiter.operations.keys import KeyService
+from arbiter.operations.models import ManagementModels, ModelCatalog
 from arbiter.persistence.tenant import runtime_engine
 from arbiter.transport.audit import router as audit_router
 from arbiter.transport.health import router as health_router
 from arbiter.transport.keys import router as key_router
+from arbiter.transport.models import router as model_router
 
 
 def _resources() -> tuple[
-    Engine, OidcSettings, ssl.SSLContext, AuditCursor, KeyIssuer, KeyCursor, KeyVerifier
+    Engine,
+    OidcSettings,
+    ssl.SSLContext,
+    AuditCursor,
+    KeyIssuer,
+    KeyCursor,
+    KeyVerifier,
+    ModelCatalog,
 ]:
     # Configuration, certificate and secret-file IO are outside the event loop.
     settings = OidcSettings(
@@ -49,6 +59,7 @@ def _resources() -> tuple[
         issuer,
         KeyCursor(cursor_key),
         KeyVerifier(pepper, keys.pepper_version),
+        ModelCatalog(ModelCursor(cursor_key)),
     )
 
 
@@ -59,6 +70,8 @@ def create_app(
     key_list_service: KeyListService | None = None,
     key_revocation_service: KeyRevocationService | None = None,
     workload_access: WorkloadAccess | None = None,
+    management_models: ManagementModels | None = None,
+    model_catalog: ModelCatalog | None = None,
 ) -> FastAPI:
     """Optional explicit service wiring is for host-side tests, never request input."""
 
@@ -72,6 +85,8 @@ def create_app(
                 key_list_service,
                 key_revocation_service,
                 workload_access,
+                management_models,
+                model_catalog,
             )
         ):
             app.state.audit_service = audit_service
@@ -79,6 +94,8 @@ def create_app(
             app.state.key_list_service = key_list_service
             app.state.key_revocation_service = key_revocation_service
             app.state.workload_access = workload_access
+            app.state.management_models = management_models
+            app.state.model_catalog = model_catalog
             yield
             return
         (
@@ -89,6 +106,7 @@ def create_app(
             issuer,
             key_cursors,
             key_verifier,
+            catalog,
         ) = await to_thread.run_sync(_resources)
         try:
             async with OidcVerifier(settings, trust=trust) as verifier:
@@ -98,6 +116,8 @@ def create_app(
                 app.state.key_list_service = KeyListService(access, key_cursors)
                 app.state.key_revocation_service = KeyRevocationService(access)
                 app.state.workload_access = WorkloadAccess(key_verifier, engine)
+                app.state.model_catalog = catalog
+                app.state.management_models = ManagementModels(access, catalog)
                 yield
         finally:
             await to_thread.run_sync(engine.dispose)
@@ -111,9 +131,14 @@ def create_app(
                 del app.state.key_revocation_service
             if hasattr(app.state, "workload_access"):
                 del app.state.workload_access
+            if hasattr(app.state, "model_catalog"):
+                del app.state.model_catalog
+            if hasattr(app.state, "management_models"):
+                del app.state.management_models
 
     app = FastAPI(debug=False, docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.include_router(health_router)
     app.include_router(audit_router)
     app.include_router(key_router)
+    app.include_router(model_router)
     return app

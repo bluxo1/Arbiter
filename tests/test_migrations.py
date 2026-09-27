@@ -99,6 +99,7 @@ def migrate_to(engine: Engine, revision: str, *, downgrade: bool = False) -> Non
         "0005_api_key_creation",
         "0006_api_key_revocation",
         "0007_workload_key_lookup",
+        "0008_tenant_policies",
     ],
 )
 def test_migration_empty_and_previous_then_repeat_and_round_trip(
@@ -113,6 +114,8 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
             ).scalar_one() == (
                 0
                 if previous == "0001_foundation"
+                else 7
+                if previous == "0008_tenant_policies"
                 else 5
                 if previous
                 in {"0005_api_key_creation", "0006_api_key_revocation", "0007_workload_key_lookup"}
@@ -123,7 +126,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
     with engine.begin() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
-            == "0008_tenant_policies"
+            == "0009_model_catalog"
         )
         assert (
             connection.execute(
@@ -173,6 +176,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
         "0005_api_key_creation",
         "0006_api_key_revocation",
         "0007_workload_key_lookup",
+        "0008_tenant_policies",
     ],
 )
 def test_upgrade_preserves_existing_tenant_and_audit(

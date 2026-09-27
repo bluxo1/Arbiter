@@ -1,10 +1,17 @@
 # Arbiter
 
-Phase 1 foundation and bounded Phase 2 identity, audit access and key administration. Read
+Phase 1 foundation and bounded Phase 2 identity, audit, key administration and model catalogs. Read
 [the agent workflow](docs/Agents.md) and [project memory](docs/Memory.md) before changes.
-The API exposes health, authenticated tenant audit reads and admin key creation/listing/revocation. Liveness returns 200;
+The API exposes health, authenticated tenant audit reads, admin key creation/listing/revocation,
+and tenant-approved model catalogs for OIDC members/admins and workload API keys. Liveness returns 200;
 readiness deliberately returns 503 until all required security gates exist.
-Inference and workload data endpoints remain unavailable; Phase 2 is incomplete.
+Inference, usage and request metadata endpoints remain unavailable; Phase 2 is incomplete.
+
+Model catalogs return only active, registered aliases approved by the tenant's current policy:
+`alias`, `output_cap`, `credit_charge`, and `policy_revision`. They use encrypted tenant-bound
+cursors with default page size 50 and maximum 100. Workload catalog access requires a valid
+key, with no additional scope beyond the approved key scopes. An empty registry or current
+policy yields an empty catalog; catalog access never invokes or downloads a model.
 
 On the validated Windows/WSL2 host, prepare private files on D: and load public paths:
 

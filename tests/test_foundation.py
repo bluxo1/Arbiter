@@ -42,7 +42,7 @@ def test_health_stays_fail_closed(secret_directory: Path) -> None:
 def test_no_tenant_or_provider_route(secret_directory: Path, path: str, tenant: str) -> None:
     with TestClient(create_app()) as client:
         response = client.post(path, headers={"X-Tenant-ID": tenant}, json={"tenant_id": tenant})
-        assert response.status_code == 404
+        assert response.status_code == (405 if path == "/v1/models" else 404)
 
 
 @pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])

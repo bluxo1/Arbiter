@@ -185,7 +185,12 @@ async def test_forged_body_route_header_model_input_cannot_select_tenant(
         "tenant_id": str(workloads.members.tenant_a),
         "key_id": str(workloads.key_a.id),
     }
-    for path in ("/v1/chat/completions", "/v1/models", "/v1/usage"):
+    assert (
+        await client.post(
+            "/v1/models", headers=auth(workloads.key_a.credential.get_secret_value()), json={}
+        )
+    ).status_code == 405
+    for path in ("/v1/chat/completions", "/v1/usage"):
         assert (
             await client.post(
                 path, headers=auth(workloads.key_a.credential.get_secret_value()), json={}
