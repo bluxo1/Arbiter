@@ -19,7 +19,16 @@ x-app: &app
 services:
   api:
     <<: *app
-    networks: [edge, control]
+    networks: [edge, control, identity]
+    environment:
+      ARBITER_DB_HOST: postgres
+      ARBITER_OIDC_ISSUER: ${ARBITER_OIDC_ISSUER:-https://localhost:18443/realms/arbiter}
+      ARBITER_OIDC_AUDIENCE: ${ARBITER_OIDC_AUDIENCE:-arbiter-api}
+      ARBITER_OIDC_JWKS_URL: ${ARBITER_OIDC_JWKS_URL:-https://arbiter-p0-keycloak:8443/realms/arbiter/protocol/openid-connect/certs}
+      ARBITER_OIDC_CA_FILE: /run/config/oidc-ca.pem
+    configs:
+      - source: oidc_ca
+        target: /run/config/oidc-ca.pem
     secrets: [db_runtime_password]
     ports: ["127.0.0.1:${ARBITER_API_PORT:-8000}:8000"]
     depends_on:
@@ -130,6 +139,13 @@ networks:
   edge: {}
   control: {internal: true}
   provider: {internal: true}
+  identity:
+    external: true
+    name: ${ARBITER_IDENTITY_NETWORK:-arbiter-p0-identity}
+
+configs:
+  oidc_ca:
+    file: ${ARBITER_OIDC_CA_FILE:-D:/AI & ML/ArbiterData/phase0/identity-ca.pem}
 
 volumes:
   postgres_data:

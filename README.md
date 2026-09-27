@@ -143,3 +143,47 @@ real isolation and disposable migration suites. Inspect actual mounts, networks
 and published ports. Stop/recreate with `down` and `up`, without `--volumes`, to
 verify retained data and credentials. See project memory for the actual closure
 evidence and Phase 1 assessment. Inference remains unavailable.
+
+The first Phase 2 task supplies OIDC verification and membership authorization as
+application services. Management HTTP routes are still unavailable; this task
+does not implement API keys, administration endpoints, admission or inference.
+`OidcVerifier` is an async context manager with bounded HTTPS JWKS retrieval,
+RS256-only signature checks, exact issuer/audience checks, required `exp/iss/sub/aud`
+and validation of optional `nbf/iat`. Clock skew is configurable from 0 to 60
+seconds; cache lifetime is at most 900 seconds. Unknown key IDs refresh once per
+verification attempt. Expired cache entries never authorize using stale keys when
+refresh fails. Redirects, environment proxies and token-supplied key URLs cannot
+redirect the configured JWKS trust. Credentials and claims are not logged.
+
+Public configuration in `.env.example` references the separately provisioned
+Keycloak issuer, its private container JWKS transport and explicit local CA.
+API joins that existing identity network and receives the public CA as a read-only
+config mount; no Keycloak/admin/client credential is mounted into it. The canonical
+issuer stays `https://localhost:18443/realms/arbiter`, even though container JWKS
+retrieval uses `arbiter-p0-keycloak:8443`. The development issuer must already exist;
+Arbiter Compose does not provision it or create users. Missing/invalid trust fails
+closed when creating/using the verifier. Full application readiness remains 503.
+
+`ManagementAccess.run` verifies the token before touching PostgreSQL, resolves
+active tenant/membership using the exact `(issuer, subject)`, then constructs
+tenant context and executes a server-supplied service callback in the same scoped
+transaction. Database work runs in bounded worker threads. Tenant/role/email claims
+do not establish membership or permission; admin requirements use the database
+membership role. Each call rechecks membership and tenant status; no successful
+authorization cache exists. No function constructs context from an unchecked
+HTTP header or body. The separate Bearer parser rejects duplicate/mixed credential
+headers, and is ready for future management endpoints.
+
+Before applying revision `0004_identity_lookup`, repeat the explicit bootstrap
+command. It provisions a dedicated non-login, non-superuser, NOBYPASSRLS lookup
+owner and gives only the trusted migration role non-inheriting ownership-management
+membership. The lookup owner has column-level SELECT and two explicit SELECT RLS
+policies, with no schema-create or write privileges. Its fixed-search-path,
+static SECURITY DEFINER function returns only one active binding for the supplied
+verified identity and tenant selector; PUBLIC/operator execution is denied. It
+does not set tenant context. Runtime can execute that narrow function, cannot
+assume the owner role or read the global principal directory, and retains all
+ordinary FORCE RLS protections. Arbitrary SQL executing forged identity parameters
+is outside the documented application trust boundary. Later dispatch must recheck
+authority and serialize security mutations; this task supplies no dispatch-race
+or complete Phase 2 claim.

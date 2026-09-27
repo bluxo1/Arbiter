@@ -88,7 +88,9 @@ def migrate_to(engine: Engine, revision: str, *, downgrade: bool = False) -> Non
             command.upgrade(config, revision)
 
 
-@pytest.mark.parametrize("previous", [None, "0001_foundation", "0002_tenant_isolation"])
+@pytest.mark.parametrize(
+    "previous", [None, "0001_foundation", "0002_tenant_isolation", "0003_operator_audit"]
+)
 def test_migration_empty_and_previous_then_repeat_and_round_trip(
     disposable_database: Engine, previous: str | None
 ) -> None:
@@ -98,13 +100,13 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
         with engine.begin() as connection:
             assert connection.execute(
                 text("SELECT count(*) FROM pg_tables WHERE schemaname='arbiter'")
-            ).scalar_one() == (4 if previous == "0002_tenant_isolation" else 0)
+            ).scalar_one() == (0 if previous == "0001_foundation" else 4)
     migrate_to(engine, "head")
     migrate_to(engine, "head")
     with engine.begin() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
-            == "0003_operator_audit"
+            == "0004_identity_lookup"
         )
         assert (
             connection.execute(
@@ -145,12 +147,14 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
     migrate_to(engine, "head")
 
 
-def test_operator_audit_upgrade_preserves_existing_tenant_and_audit(
+@pytest.mark.parametrize("previous", ["0002_tenant_isolation", "0003_operator_audit"])
+def test_upgrade_preserves_existing_tenant_and_audit(
     disposable_database: Engine,
+    previous: str,
 ) -> None:
     engine = disposable_database
     tenant, event = uuid4(), uuid4()
-    migrate_to(engine, "0002_tenant_isolation")
+    migrate_to(engine, previous)
     with engine.begin() as connection:
         connection.execute(
             text("SELECT set_config('arbiter.tenant_id', :tenant, true)"), {"tenant": str(tenant)}

@@ -2,12 +2,43 @@
 
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
 
 DatabaseRole = Literal["bootstrap", "migration", "operator", "runtime"]
+
+
+class OidcSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="ARBITER_OIDC_", frozen=True)
+
+    issuer: str
+    audience: str = Field(min_length=1, max_length=255)
+    jwks_url: str
+    ca_file: Path | None = None
+    algorithms: tuple[Literal["RS256"]] = ("RS256",)
+    clock_skew_seconds: int = Field(default=60, ge=0, le=60)
+    cache_seconds: int = Field(default=900, ge=1, le=900)
+
+    @field_validator("issuer", "jwks_url")
+    @classmethod
+    def public_https_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if (
+            not 1 <= len(value) <= 2048
+            or parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or any(c.isspace() or ord(c) < 32 for c in value)
+        ):
+            raise ValueError("public HTTPS identity URL required")
+        _ = parsed.port
+        return value
 
 
 class RedisSettings(BaseSettings):
