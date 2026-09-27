@@ -466,6 +466,7 @@ def test_policy_and_grant_catalog_matches_security_contract(store: Store) -> Non
             ("api_keys", True, True, "arbiter_migration"),
             ("audit_events", True, True, "arbiter_migration"),
             ("memberships", True, True, "arbiter_migration"),
+            ("model_registry_journal", False, False, "arbiter_migration"),
             ("principals", False, False, "arbiter_migration"),
             ("provider_models", False, False, "arbiter_migration"),
             ("tenant_policies", True, True, "arbiter_migration"),

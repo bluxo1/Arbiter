@@ -88,6 +88,38 @@ def migrate_to(engine: Engine, revision: str, *, downgrade: bool = False) -> Non
             command.upgrade(config, revision)
 
 
+@pytest.mark.parametrize("previous", ["0008_tenant_policies", "0009_model_catalog"])
+def test_registry_upgrade_preserves_legacy_configuration_without_fabricating_audit(
+    disposable_database: Engine, previous: str
+) -> None:
+    engine = disposable_database
+    object_id = uuid4()
+    migrate_to(engine, previous)
+    with engine.begin() as connection:
+        connection.execute(
+            text("""
+            INSERT INTO arbiter.provider_models
+                (id,alias,adapter,model_digest,context_cap,output_cap,credit_charge,revision,active)
+            VALUES (:id,'legacy-fixture','ollama',:digest,4096,256,10,4,false)
+        """),
+            {"id": object_id, "digest": "sha256:" + "a" * 64},
+        )
+    migrate_to(engine, "head")
+    with engine.begin() as connection:
+        assert connection.execute(
+            text(
+                "SELECT id,revision,active,journal_id FROM arbiter.provider_models "
+                "WHERE alias='legacy-fixture'"
+            )
+        ).one() == (object_id, 4, False, None)
+        assert (
+            connection.execute(
+                text("SELECT count(*) FROM arbiter.model_registry_journal")
+            ).scalar_one()
+            == 0
+        )
+
+
 @pytest.mark.parametrize(
     "previous",
     [
@@ -100,6 +132,7 @@ def migrate_to(engine: Engine, revision: str, *, downgrade: bool = False) -> Non
         "0006_api_key_revocation",
         "0007_workload_key_lookup",
         "0008_tenant_policies",
+        "0009_model_catalog",
     ],
 )
 def test_migration_empty_and_previous_then_repeat_and_round_trip(
@@ -115,7 +148,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
                 0
                 if previous == "0001_foundation"
                 else 7
-                if previous == "0008_tenant_policies"
+                if previous in {"0008_tenant_policies", "0009_model_catalog"}
                 else 5
                 if previous
                 in {"0005_api_key_creation", "0006_api_key_revocation", "0007_workload_key_lookup"}
@@ -126,13 +159,13 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
     with engine.begin() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
-            == "0009_model_catalog"
+            == "0010_model_registry"
         )
         assert (
             connection.execute(
                 text("SELECT count(*) FROM pg_tables WHERE schemaname='arbiter'")
             ).scalar_one()
-            == 7
+            == 8
         )
         assert (
             connection.execute(
@@ -177,6 +210,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
         "0006_api_key_revocation",
         "0007_workload_key_lookup",
         "0008_tenant_policies",
+        "0009_model_catalog",
     ],
 )
 def test_upgrade_preserves_existing_tenant_and_audit(

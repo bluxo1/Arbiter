@@ -37,8 +37,28 @@ foreach ($verifiedRule in $verifiedAcl.Access) {
         throw 'Secret-directory access is not restricted to the expected principals.'
     }
 }
-foreach ($directory in @('postgres', 'redis', 'ollama\models', 'tmp', 'phase1')) {
+foreach ($directory in @('postgres', 'redis', 'ollama\models', 'tmp', 'phase1', 'model-approvals')) {
     New-Item -ItemType Directory -Force -Path (Join-Path $resolvedRoot $directory) | Out-Null
+}
+$approvalDirectory = Join-Path $resolvedRoot 'model-approvals'
+foreach ($existingRule in @((Get-Acl -LiteralPath $approvalDirectory).Access | Where-Object { -not $_.IsInherited })) {
+    $ruleSid = $existingRule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+    if ($ruleSid -notin $allowedSids -or $existingRule.AccessControlType -ne 'Allow') {
+        throw 'Unexpected approval-directory permissions; review them before provisioning.'
+    }
+}
+$approvalGrants = @($allowedSids | ForEach-Object { '*' + $_ + ':(OI)(CI)F' })
+& icacls.exe $approvalDirectory '/inheritance:r' '/grant:r' @approvalGrants | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Could not protect the approval directory.' }
+$approvalAcl = Get-Acl -LiteralPath $approvalDirectory
+if (-not $approvalAcl.AreAccessRulesProtected -or @($approvalAcl.Access).Count -ne 3) {
+    throw 'Approval-directory permissions failed verification.'
+}
+foreach ($rule in $approvalAcl.Access) {
+    if ($rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -notin $allowedSids -or
+        $rule.AccessControlType -ne 'Allow' -or $rule.FileSystemRights -ne 'FullControl') {
+        throw 'Approval-directory access is not restricted to the expected principals.'
+    }
 }
 foreach ($secretName in @('db_bootstrap_password', 'db_migration_password', 'db_operator_password', 'db_runtime_password', 'audit_cursor_key', 'api_key_pepper')) {
     $secretPath = Join-Path $secretDirectory $secretName

@@ -67,6 +67,12 @@ Tenant-owned records carry non-null `tenant_id`; parent relationships use `(tena
 
 Runtime grants prohibit audit/accounting UPDATE or DELETE. Mutations, reservations, and dispatch transitions append their evidence in the same transaction. Metadata retention defaults to 90 days for terminal requests/audit/accounting and 13 months for aggregate windows. Unresolved requests are never purged. Retain minimal idempotency tombstones for the lifetime of the key plus 90 days so old retries cannot redispatch. Cleanup is a privileged, audited maintenance operation; revoked key records remain while referenced.
 
+### Global model-registry journal
+
+Local operator model-registry mutations append a separate global `model_registry_journal` entry in the same PostgreSQL transaction as the corresponding provider-model revision. The journal has no tenant ownership or `tenant_id`; it records only operator registry mutations, with an exact model/revision binding, operator actor, action, UTC timestamp, correlation identifier and validated configuration/approval metadata. Entries are append-only and immutable after commit. Credentials, secrets, provider URLs, prompts, completions and tenant content are prohibited.
+
+Only the separately credentialed local operator path may perform these mutations. Runtime credentials cannot mutate the registry or read/write the journal; neither the journal nor operator provisioning has a tenant-facing HTTP surface. This journal does not replace tenant `audit_events` or alter tenant ownership, RLS, audit grants or tenant catalog authorization. Failed registry mutations leave neither an accepted revision nor success evidence.
+
 ## Admission and dispatch
 
 ```text

@@ -4,6 +4,7 @@ import argparse
 import json
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Literal, Never
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
@@ -14,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 
 from arbiter.config import DatabaseSettings
 from arbiter.operations.policy import PolicyInput, PolicyService
+from arbiter.operations.registry import ModelInput, RegistryService, read_approval
 from arbiter.persistence.operator import OperatorRepository, operator_engine, operator_transaction
 
 TenantStatus = Literal["active", "suspended"]
@@ -165,6 +167,18 @@ def main(argv: Sequence[str] | None = None) -> None:
     policy_parser.add_argument("--monthly-budget", type=int, required=True)
     policy_parser.add_argument("--concurrency", type=int, required=True)
     policy_parser.add_argument("--model-alias", action="append", default=[])
+    for name in ("register-model", "update-model"):
+        model_parser = commands.add_parser(name)
+        model_parser.add_argument("--alias", required=True)
+        model_parser.add_argument("--adapter", choices=("ollama",), required=True)
+        model_parser.add_argument("--digest", required=True)
+        model_parser.add_argument("--context-cap", type=int, required=True)
+        model_parser.add_argument("--output-cap", type=int, required=True)
+        model_parser.add_argument("--credit-charge", type=int, required=True)
+        model_parser.add_argument("--state", choices=("active", "inactive"), required=True)
+        model_parser.add_argument("--approval", type=Path, required=True)
+        if name == "update-model":
+            model_parser.add_argument("--expected-revision", type=int, required=True)
     engine: Engine | None = None
     try:
         args = parser.parse_args(argv)
@@ -187,7 +201,26 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         engine = operator_engine(DatabaseSettings())
         service = ProvisioningService(engine)
-        if args.command == "create-tenant":
+        if args.command in ("register-model", "update-model"):
+            model = ModelInput(
+                args.alias,
+                args.adapter,
+                args.digest,
+                args.context_cap,
+                args.output_cap,
+                args.credit_charge,
+                args.state == "active",
+            )
+            registry_result = RegistryService(engine).provision(
+                model,
+                read_approval(args.approval),
+                expected_revision=args.expected_revision
+                if args.command == "update-model"
+                else None,
+            )
+            print(json.dumps(asdict(registry_result), default=str))
+            return
+        elif args.command == "create-tenant":
             result = service.create_tenant()
         elif args.command == "set-tenant-status":
             result = service.set_tenant_status(args.tenant, args.status)

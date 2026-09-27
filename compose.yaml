@@ -126,6 +126,12 @@ services:
     entrypoint: [python, -m, arbiter.operations.provision]
     command: [--help]
     secrets: [db_operator_password]
+    volumes:
+      - type: bind
+        source: ${ARBITER_MODEL_APPROVALS_DIR:-D:/AI & ML/ArbiterData/model-approvals}
+        target: /run/approvals
+        read_only: true
+        bind: {create_host_path: false}
     depends_on:
       postgres: {condition: service_healthy}
 

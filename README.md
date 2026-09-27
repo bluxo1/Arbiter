@@ -13,6 +13,41 @@ cursors with default page size 50 and maximum 100. Workload catalog access requi
 key, with no additional scope beyond the approved key scopes. An empty registry or current
 policy yields an empty catalog; catalog access never invokes or downloads a model.
 
+Local registry provisioning uses `operator register-model` and `operator update-model`.
+These commands append immutable global journal evidence in the same transaction; updates
+require `--expected-revision`. Runtime and tenant HTTP identities cannot mutate this registry
+or access its journal. Tenant audit records remain separate.
+
+Before registration, the trusted operator must verify the text model's exact digest, pinned
+runtime, context/output behavior and license approval. Put that prior-verification attestation
+in a protected file under `ARBITER_MODEL_APPROVALS_DIR`; preparation creates an empty protected
+directory, and only the operator container mounts it read-only at `/run/approvals`. No model
+is approved automatically. The strict JSON fields are `adapter` (`ollama`), `model_digest`,
+`runtime_digest`, `verification_digest` (SHA-256 of the retained verification evidence),
+`context_cap`, `output_cap`, `verified_text` and `license_accepted`. All digests must be
+`sha256:` followed by 64 lowercase hexadecimal characters; both attestation flags must
+describe previously completed approval. The command validates the attestation's structure
+and configuration bounds, and trusts the local operator for its truth; it does not itself
+benchmark, contact a provider, or accept a license. Retain the referenced evidence privately.
+
+```powershell
+docker compose --profile operations run --rm operator register-model `
+  --alias '<public alias>' --adapter ollama --digest '<approved sha256 digest>' `
+  --context-cap 4096 --output-cap 1024 --credit-charge 10 --state inactive `
+  --approval /run/approvals/verified-model.json
+
+docker compose --profile operations run --rm operator update-model `
+  --alias '<same public alias>' --adapter ollama --digest '<approved sha256 digest>' `
+  --context-cap 4096 --output-cap 1024 --credit-charge 10 --state active `
+  --expected-revision 1 --approval /run/approvals/verified-model.json
+```
+
+Replace placeholders only with reviewed operator inputs; these examples register nothing.
+Context/output caps may not exceed the attested limits; output is at most 1,024 and no greater
+than context. Charges are positive checked integers. Duplicate registrations and stale updates
+fail without journal success evidence. Deactivation removes the alias from subsequent tenant
+catalog reads. No CLI operation enables inference or changes tenant model approvals.
+
 On the validated Windows/WSL2 host, prepare private files on D: and load public paths:
 
 ```powershell
