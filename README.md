@@ -4,7 +4,7 @@ Phase 1 foundation and bounded Phase 2 identity, audit access and key administra
 [the agent workflow](docs/Agents.md) and [project memory](docs/Memory.md) before changes.
 The API exposes health, authenticated tenant audit reads and admin key creation/listing/revocation. Liveness returns 200;
 readiness deliberately returns 503 until all required security gates exist.
-Inference and API key authentication remain unavailable; Phase 2 is incomplete.
+Inference and workload data endpoints remain unavailable; Phase 2 is incomplete.
 
 On the validated Windows/WSL2 host, prepare private files on D: and load public paths:
 
@@ -234,7 +234,7 @@ The credential format is `arb1.<32-character public identifier>.<43-character
 base64url secret>`; the secret contains 32 random bytes. Store the returned
 credential securely at the caller. It cannot be retrieved or replayed after a
 lost response. Repeated valid POSTs create distinct keys; creation has no
-idempotency contract. Workload key authentication is not implemented yet.
+idempotency contract. Workload verification uses the restricted service described below.
 Creating a key does not enable inference.
 
 Preparation provisions an independent base64-encoded 32-byte `api_key_pepper`
@@ -298,6 +298,39 @@ lock. The timestamp and content-free `api_key_revoked` event commit together;
 an audit failure rolls back the mutation. The response is produced after commit.
 
 This establishes durable revocation and the lock order required of future
-dispatch checks. Workload key resolution and dispatch authorization are absent,
-so their revocation denial/race gates remain unproven. No positive authorization
-cache, workload endpoint, provider call or inference path is introduced.
+dispatch checks. Fresh workload verification now rejects committed revocation;
+dispatch authorization and its full race gate remain unimplemented. No positive
+authorization cache, workload data endpoint, provider call or inference path is introduced.
+
+Workload requests have a reusable `run_workload` transport boundary and
+`WorkloadAccess` service. Neither accepts a tenant selector. A server-owned
+operation and optional required scope run only after a Bearer key resolves to
+its own key/tenant/scopes binding. Transaction-local tenant context is established
+only after successful verification and scope checks. Body, model, route and tenant
+header values cannot establish authority. Duplicate/mixed credentials deny.
+Malformed, unknown, wrong-secret, revoked, expired, wrong-pepper-version and
+suspended-tenant credentials share sanitized 401; missing scope returns 403;
+unavailable database state returns 503. No positive authorization is cached.
+
+Repeat explicit bootstrap before migration `0007_workload_key_lookup`; it
+provisions `arbiter_key_lookup` as a separate NOLOGIN/NOSUPERUSER/NOBYPASSRLS
+read-only helper owner. Only trusted migration can assume it, with non-inheriting
+membership. Runtime can only execute `resolve_api_key(public_id, candidate, version)`;
+it still cannot read stored verifiers or assume the helper role. The fixed-search-path
+helper has explicit SELECT policies and only necessary column grants on keys/tenants,
+with no mutation, principal-directory, audit-read or schema-create authority.
+
+Parsing requires the exact canonical issued format and 32 decoded secret bytes.
+Issuance and verification share the same peppered HMAC implementation. The
+candidate HMAC enters only the bound helper call, with SQLAlchemy parameters
+hidden; plaintext secrets never reach SQL. The stored verifier stays in PostgreSQL.
+The helper executes all 32 bytewise XOR/OR comparison steps, including against
+a fixed dummy value for an unknown identifier, before checking status/expiry/version.
+There is no mismatch-dependent comparison exit. This fixed-work comparison does
+not claim identical total HTTP/query latency across different indexed lookup results.
+
+Tests use a fixture-only HTTP route to exercise this boundary; it is absent from
+production. Existing management routes continue to require OIDC membership/admin
+authorization. Workload model/usage/request endpoints require their own bounded
+implementation. Verified workload identity is not dispatch authority; future
+durable admission must recheck tenant/key status under the documented lock order.
