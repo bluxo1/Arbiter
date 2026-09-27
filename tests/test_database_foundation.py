@@ -70,7 +70,7 @@ def test_only_migration_role_owns_schema_and_version_marker() -> None:
         with engine.connect() as connection:
             assert (
                 connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar()
-                == "0012_reservation_transactions"
+                == "0013_undispatched_release"
             )
             assert (
                 connection.execute(

@@ -22,6 +22,8 @@ from test_reservation_transactions import ReservationStore
 from test_tenant_isolation import postgres_error, set_context
 
 from arbiter.config import DatabaseSettings
+from arbiter.governance.release import ReleaseService
+from arbiter.persistence.workload import KeyBinding
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("ARBITER_TEST_MIGRATIONS") != "1",
@@ -90,6 +92,86 @@ def migrate_to(engine: Engine, revision: str, *, downgrade: bool = False) -> Non
             command.downgrade(config, revision)
         else:
             command.upgrade(config, revision)
+
+
+def test_release_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
+    disposable_database: Engine,
+) -> None:
+    engine = disposable_database
+    migrate_to(engine, "0012_reservation_transactions")
+    settings = DatabaseSettings()
+    runtime, operator = (
+        create_engine(
+            settings.url(role).set(database=engine.url.database),
+            poolclass=NullPool,
+            hide_parameters=True,
+        )
+        for role in ("runtime", "operator")
+    )
+    model, alias = uuid4(), "reserve-fixture-" + uuid4().hex
+    store = ReservationStore(runtime, operator, engine, model, alias)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("""
+                INSERT INTO arbiter.provider_models
+                (id,alias,adapter,model_digest,context_cap,output_cap,credit_charge,revision,active)
+                VALUES (:id,:alias,'ollama',:digest,4096,256,10,1,true)
+            """),
+                {"id": model, "alias": alias, "digest": "sha256:" + "d" * 64},
+            )
+        actor = store.actor()
+        result = store.service().reserve(actor.credential, uuid4().hex, store.request())
+        with engine.begin() as connection:
+            set_context(connection, actor.tenant)
+            before: str = connection.execute(
+                text("""
+                SELECT to_jsonb(r)::text FROM arbiter.requests r WHERE tenant_id=:t AND id=:id
+            """),
+                {"t": actor.tenant, "id": result.request_id},
+            ).scalar_one()
+        # A nonempty 0012 reservation remains representable on a safe round trip.
+        migrate_to(engine, "head")
+        migrate_to(engine, "0012_reservation_transactions", downgrade=True)
+        migrate_to(engine, "head")
+        with engine.begin() as connection:
+            set_context(connection, actor.tenant)
+            row = connection.execute(
+                text("""
+                SELECT release_audit_id,
+                    (to_jsonb(r)-ARRAY['release_audit_id','release_action'])::text
+                FROM arbiter.requests r WHERE tenant_id=:t AND id=:id
+            """),
+                {"t": actor.tenant, "id": result.request_id},
+            ).one()
+            assert row[0] is None and row[1] == before
+        released = ReleaseService(runtime).release(
+            KeyBinding(actor.key, actor.tenant, ("inference:write",)),
+            result.request_id,
+            "cancelled",
+        )
+        assert released.changed and store.totals(actor) == (0, 0, 0, 0)
+        with pytest.raises(DBAPIError) as failure:
+            migrate_to(engine, "0012_reservation_transactions", downgrade=True)
+        assert postgres_error(failure.value).sqlstate == "23514"
+        with engine.begin() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT version_num FROM public.alembic_version")
+                ).scalar_one()
+                == "0013_undispatched_release"
+            )
+            set_context(connection, actor.tenant)
+            assert connection.execute(
+                text("""
+                SELECT state,release_audit_id IS NOT NULL FROM arbiter.requests
+                WHERE tenant_id=:t AND id=:id
+            """),
+                {"t": actor.tenant, "id": result.request_id},
+            ).one() == ("released", True)
+    finally:
+        runtime.dispose()
+        operator.dispose()
 
 
 def test_reservation_upgrade_preserves_legacy_evidence_and_blocks_lossy_downgrade(
@@ -166,7 +248,8 @@ def test_reservation_upgrade_preserves_legacy_evidence_and_blocks_lossy_downgrad
             after: str = connection.execute(
                 text("""
                 SELECT (to_jsonb(r)-ARRAY[
-                    'reservation_audit_id','audit_action','audit_outcome'])::text
+                    'reservation_audit_id','audit_action','audit_outcome',
+                    'release_audit_id','release_action'])::text
                 FROM arbiter.requests r WHERE tenant_id=:tenant AND id=:id
             """),
                 {"tenant": actor.tenant, "id": values["request"]},
@@ -185,7 +268,7 @@ def test_reservation_upgrade_preserves_legacy_evidence_and_blocks_lossy_downgrad
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0012_reservation_transactions"
+                == "0013_undispatched_release"
             )
     finally:
         runtime.dispose()
@@ -239,6 +322,7 @@ def test_registry_upgrade_preserves_legacy_configuration_without_fabricating_aud
         "0009_model_catalog",
         "0010_model_registry",
         "0011_accounting_foundation",
+        "0012_reservation_transactions",
     ],
 )
 def test_migration_empty_and_previous_then_repeat_and_round_trip(
@@ -254,7 +338,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
                 0
                 if previous == "0001_foundation"
                 else 13
-                if previous == "0011_accounting_foundation"
+                if previous in {"0011_accounting_foundation", "0012_reservation_transactions"}
                 else 8
                 if previous == "0010_model_registry"
                 else 7
@@ -269,7 +353,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
     with engine.begin() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
-            == "0012_reservation_transactions"
+            == "0013_undispatched_release"
         )
         assert (
             connection.execute(
@@ -323,6 +407,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
         "0009_model_catalog",
         "0010_model_registry",
         "0011_accounting_foundation",
+        "0012_reservation_transactions",
     ],
 )
 def test_upgrade_preserves_existing_tenant_and_audit(

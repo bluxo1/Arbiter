@@ -10,6 +10,7 @@ LOOKUP_ROLE = "arbiter_identity_lookup"
 KEY_ROLE = "arbiter_key_writer"
 KEY_LOOKUP_ROLE = "arbiter_key_lookup"
 RESERVATION_ROLE = "arbiter_reservation_writer"
+RELEASE_ROLE = "arbiter_release_writer"
 
 
 def bootstrap(settings: DatabaseSettings) -> None:
@@ -41,7 +42,7 @@ def bootstrap(settings: DatabaseSettings) -> None:
                 (name,),
             ).fetchall()
             allowed = (
-                {LOOKUP_ROLE, KEY_ROLE, KEY_LOOKUP_ROLE, RESERVATION_ROLE}
+                {LOOKUP_ROLE, KEY_ROLE, KEY_LOOKUP_ROLE, RESERVATION_ROLE, RELEASE_ROLE}
                 if role == "migration"
                 else set()
             )
@@ -146,6 +147,29 @@ def bootstrap(settings: DatabaseSettings) -> None:
         )
         connection.execute(
             "GRANT arbiter_reservation_writer TO arbiter_migration WITH INHERIT FALSE, SET TRUE"
+        )
+        if (
+            connection.execute(
+                "SELECT 1 FROM pg_roles WHERE rolname=%s", (RELEASE_ROLE,)
+            ).fetchone()
+            is None
+        ):
+            connection.execute("CREATE ROLE arbiter_release_writer")
+        if (
+            connection.execute(
+                "SELECT 1 FROM pg_auth_members WHERE member="
+                "(SELECT oid FROM pg_roles WHERE rolname=%s)",
+                (RELEASE_ROLE,),
+            ).fetchone()
+            is not None
+        ):
+            raise ValueError("unexpected release owner membership")
+        connection.execute(
+            "ALTER ROLE arbiter_release_writer WITH NOLOGIN NOSUPERUSER NOCREATEDB "
+            "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL"
+        )
+        connection.execute(
+            "GRANT arbiter_release_writer TO arbiter_migration WITH INHERIT FALSE, SET TRUE"
         )
         connection.execute(
             sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(sql.Identifier(settings.name))

@@ -1,6 +1,6 @@
 # Arbiter
 
-Phase 1/2 foundation and bounded Phase 3 accounting persistence/reservation transactions. Read
+Phase 1/2 foundation and bounded Phase 3 accounting, reservation and undispatched release. Read
 [the agent workflow](docs/Agents.md) and [project memory](docs/Memory.md) before changes.
 The API exposes health, authenticated tenant audit reads, admin key creation/listing/revocation,
 and tenant-approved model catalogs for OIDC members/admins and workload API keys. Liveness returns 200;
@@ -16,7 +16,13 @@ serializes quota/budget/concurrency checks, and commits the request, reservation
 and API-key audit evidence together. Matching retries return prior-admission metadata; conflicting
 fingerprints fail without allocating again. Secrets and message content are never persisted.
 No complete admission pipeline, rate limiter, dispatch, reconciliation or provider path exists yet.
-No usage/request route exposes these records; settlement and lifetime maintenance remain future work.
+Migration `0013_undispatched_release` adds a separate restricted cleanup capability, using the
+verified in-flight key binding. It releases only reserved requests without a dispatch marker,
+restores the original windows' reserved totals, and commits terminal state, accounting and
+tenant audit together. Repeated release preserves the original outcome and evidence. Released
+requests cannot be resurrected by stale handlers; committed allocations cannot be refunded.
+No usage/request route exposes these records; dispatch settlement and lifetime maintenance remain
+future work. Cleanup is internal and has no HTTP or operator command surface.
 Migrations create no usage or production model rows.
 
 Model catalogs return only active, registered aliases approved by the tenant's current policy:
