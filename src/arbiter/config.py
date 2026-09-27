@@ -12,6 +12,26 @@ from sqlalchemy import URL
 DatabaseRole = Literal["bootstrap", "migration", "operator", "runtime"]
 
 
+class FingerprintSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="ARBITER_FINGERPRINT_", frozen=True)
+
+    key_file: Path = Path("/run/secrets/request_fingerprint_key")
+    version: int = Field(default=1, ge=1, le=2147483647)
+
+    def key(self) -> bytes:
+        try:
+            with self.key_file.open("rb") as stream:
+                encoded = stream.read(129)
+            if len(encoded) > 128:
+                raise ValueError("oversized fingerprint key file")
+            key = base64.b64decode(encoded.strip(), validate=True)
+            if len(key) != 32:
+                raise ValueError("invalid fingerprint key length")
+            return key
+        except ValueError:
+            raise ValueError("invalid fingerprint key file") from None
+
+
 class KeySettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ARBITER_KEYS_", frozen=True)
 

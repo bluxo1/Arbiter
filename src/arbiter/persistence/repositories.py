@@ -42,7 +42,7 @@ class AuditRecord:
 @dataclass(frozen=True, slots=True)
 class AuditEvent:
     id: UUID
-    actor_type: Literal["member", "operator"]
+    actor_type: Literal["member", "operator", "api_key"]
     actor_membership_id: UUID | None
     action: str
     target_id: UUID

@@ -1,6 +1,6 @@
 # Arbiter
 
-Phase 1/2 foundation and bounded Phase 3 accounting persistence. Read
+Phase 1/2 foundation and bounded Phase 3 accounting persistence/reservation transactions. Read
 [the agent workflow](docs/Agents.md) and [project memory](docs/Memory.md) before changes.
 The API exposes health, authenticated tenant audit reads, admin key creation/listing/revocation,
 and tenant-approved model catalogs for OIDC members/admins and workload API keys. Liveness returns 200;
@@ -10,9 +10,14 @@ Inference, usage and request metadata endpoints remain unavailable; Phase 3 is i
 Migration `0011_accounting_foundation` adds tenant-owned UTC quota/budget windows,
 request/idempotency records, reservations and append-only accounting events with FORCE RLS.
 Scoped repositories read these records; runtime and operator roles have no direct write grants.
-No admission writer, rate limiter, dispatch, reconciliation or provider path exists yet.
-Window totals are not exposed as authoritative usage until the future atomic writer maintains
-them alongside request/reservation evidence. Migration creates no usage or production model rows.
+Migration `0012_reservation_transactions` grants runtime execution of one scoped reservation
+capability owned by a non-login, non-bypass role. The internal transaction revalidates keys,
+serializes quota/budget/concurrency checks, and commits the request, reservation, accounting
+and API-key audit evidence together. Matching retries return prior-admission metadata; conflicting
+fingerprints fail without allocating again. Secrets and message content are never persisted.
+No complete admission pipeline, rate limiter, dispatch, reconciliation or provider path exists yet.
+No usage/request route exposes these records; settlement and lifetime maintenance remain future work.
+Migrations create no usage or production model rows.
 
 Model catalogs return only active, registered aliases approved by the tenant's current policy:
 `alias`, `output_cap`, `credit_charge`, and `policy_revision`. They use encrypted tenant-bound
@@ -72,6 +77,10 @@ docker compose up -d --wait api ollama
 Secret preparation retains existing values. Bootstrap is an explicit, privileged
 local command; it is not part of API startup. Migrations use their own credential.
 The API receives only its runtime password, audit cursor key and API key pepper files.
+Preparation also retains a separate `request_fingerprint_key` for the internal reservation component;
+it is not mounted into or wired to the API yet. `FingerprintSettings` reads that file and its positive
+version (`ARBITER_FINGERPRINT_KEY_FILE`, `ARBITER_FINGERPRINT_VERSION`). Retain the key/version while
+their idempotency records remain in use; rotation/key-ring and tombstone maintenance are not implemented.
 Keep secret values outside Git;
 `.env.example` contains public paths only. Local Compose secrets are file mounts,
 so protect their host directory as well as restricting per-service mounts.

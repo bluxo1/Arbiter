@@ -60,7 +60,7 @@ foreach ($rule in $approvalAcl.Access) {
         throw 'Approval-directory access is not restricted to the expected principals.'
     }
 }
-foreach ($secretName in @('db_bootstrap_password', 'db_migration_password', 'db_operator_password', 'db_runtime_password', 'audit_cursor_key', 'api_key_pepper')) {
+foreach ($secretName in @('db_bootstrap_password', 'db_migration_password', 'db_operator_password', 'db_runtime_password', 'audit_cursor_key', 'api_key_pepper', 'request_fingerprint_key')) {
     $secretPath = Join-Path $secretDirectory $secretName
     if (Test-Path -LiteralPath $secretPath) {
         foreach ($fileRule in (Get-Acl -LiteralPath $secretPath).Access) {
@@ -71,7 +71,7 @@ foreach ($secretName in @('db_bootstrap_password', 'db_migration_password', 'db_
         }
         continue
     }
-    $byteCount = if ($secretName -in @('audit_cursor_key', 'api_key_pepper')) { 32 } else { 48 }
+    $byteCount = if ($secretName -in @('audit_cursor_key', 'api_key_pepper', 'request_fingerprint_key')) { 32 } else { 48 }
     $randomBytes = New-Object byte[] $byteCount
     $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
     try { $generator.GetBytes($randomBytes) } finally { $generator.Dispose() }
@@ -79,4 +79,4 @@ foreach ($secretName in @('db_bootstrap_password', 'db_migration_password', 'db_
     $writer = New-Object System.IO.StreamWriter($stream)
     try { $writer.Write([Convert]::ToBase64String($randomBytes)) } finally { $writer.Dispose() }
 }
-Write-Output 'Arbiter directories and separate database/cursor/pepper secrets prepared; existing values retained.'
+Write-Output 'Arbiter directories and separate database/cursor/pepper/fingerprint secrets prepared; existing values retained.'

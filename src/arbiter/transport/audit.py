@@ -22,7 +22,7 @@ class AuditMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     id: UUID
-    actor_type: Literal["member", "operator"]
+    actor_type: Literal["member", "operator", "api_key"]
     actor_membership_id: UUID | None
     action: str = Field(min_length=1, max_length=64)
     target_id: UUID

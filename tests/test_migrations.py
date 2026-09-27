@@ -15,7 +15,11 @@ from alembic.config import Config
 from psycopg import sql
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.pool import NullPool
+from test_accounting_persistence import bundle_values, insert_bundle
+from test_reservation_transactions import ReservationStore
+from test_tenant_isolation import postgres_error, set_context
 
 from arbiter.config import DatabaseSettings
 
@@ -88,6 +92,106 @@ def migrate_to(engine: Engine, revision: str, *, downgrade: bool = False) -> Non
             command.upgrade(config, revision)
 
 
+def test_reservation_upgrade_preserves_legacy_evidence_and_blocks_lossy_downgrade(
+    disposable_database: Engine,
+) -> None:
+    engine = disposable_database
+    migrate_to(engine, "0011_accounting_foundation")
+    settings = DatabaseSettings()
+    runtime, operator = (
+        create_engine(
+            settings.url(role).set(database=engine.url.database),
+            poolclass=NullPool,
+            hide_parameters=True,
+        )
+        for role in ("runtime", "operator")
+    )
+    model, alias = uuid4(), "reserve-fixture-" + uuid4().hex
+    store = ReservationStore(runtime, operator, engine, model, alias)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("""
+                INSERT INTO arbiter.provider_models
+                (id,alias,adapter,model_digest,context_cap,output_cap,credit_charge,revision,active)
+                VALUES (:id,:alias,'ollama',:digest,4096,256,10,1,true)
+            """),
+                {"id": model, "alias": alias, "digest": "sha256:" + "d" * 64},
+            )
+        actor = store.actor()
+        with engine.begin() as connection:
+            set_context(connection, actor.tenant)
+            day, month = connection.execute(
+                text("""
+                SELECT date_trunc('day',CURRENT_TIMESTAMP AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',
+                    date_trunc('month',CURRENT_TIMESTAMP AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+            """)
+            ).one()
+            quota, budget = uuid4(), uuid4()
+            connection.execute(
+                text("""
+                INSERT INTO arbiter.quota_windows(id,tenant_id,window_start,reserved)
+                VALUES (:id,:tenant,:start,1)
+            """),
+                {"id": quota, "tenant": actor.tenant, "start": day},
+            )
+            connection.execute(
+                text("""
+                INSERT INTO arbiter.budget_windows(id,tenant_id,window_start,reserved)
+                VALUES (:id,:tenant,:start,10)
+            """),
+                {"id": budget, "tenant": actor.tenant, "start": month},
+            )
+            values = bundle_values(actor.tenant, actor.key, quota, budget, day, month)
+            values.update({"model": model, "alias": alias})
+            insert_bundle(connection, values)
+            legacy: str = connection.execute(
+                text("""
+                SELECT to_jsonb(r)::text FROM arbiter.requests r WHERE tenant_id=:tenant AND id=:id
+            """),
+                {"tenant": actor.tenant, "id": values["request"]},
+            ).scalar_one()
+        migrate_to(engine, "head")
+        with engine.begin() as connection:
+            set_context(connection, actor.tenant)
+            assert (
+                connection.execute(
+                    text("""
+                SELECT reservation_audit_id FROM arbiter.requests WHERE tenant_id=:tenant AND id=:id
+            """),
+                    {"tenant": actor.tenant, "id": values["request"]},
+                ).scalar_one()
+                is None
+            )
+            after: str = connection.execute(
+                text("""
+                SELECT (to_jsonb(r)-ARRAY[
+                    'reservation_audit_id','audit_action','audit_outcome'])::text
+                FROM arbiter.requests r WHERE tenant_id=:tenant AND id=:id
+            """),
+                {"tenant": actor.tenant, "id": values["request"]},
+            ).scalar_one()
+            assert legacy == after
+        assert store.counts(actor) == (1, 1, 1, 1, 1, 0)
+        store.service().reserve(actor.credential, uuid4().hex, store.request())
+        assert store.counts(actor) == (1, 1, 2, 2, 2, 1)
+        # Context-free FORCE RLS must not hide key-audits from the downgrade safety check.
+        with pytest.raises(DBAPIError) as failure:
+            migrate_to(engine, "0011_accounting_foundation", downgrade=True)
+        assert postgres_error(failure.value).sqlstate == "23514"
+        assert store.counts(actor) == (1, 1, 2, 2, 2, 1)
+        with engine.begin() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT version_num FROM public.alembic_version")
+                ).scalar_one()
+                == "0012_reservation_transactions"
+            )
+    finally:
+        runtime.dispose()
+        operator.dispose()
+
+
 @pytest.mark.parametrize("previous", ["0008_tenant_policies", "0009_model_catalog"])
 def test_registry_upgrade_preserves_legacy_configuration_without_fabricating_audit(
     disposable_database: Engine, previous: str
@@ -134,6 +238,7 @@ def test_registry_upgrade_preserves_legacy_configuration_without_fabricating_aud
         "0008_tenant_policies",
         "0009_model_catalog",
         "0010_model_registry",
+        "0011_accounting_foundation",
     ],
 )
 def test_migration_empty_and_previous_then_repeat_and_round_trip(
@@ -148,6 +253,8 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
             ).scalar_one() == (
                 0
                 if previous == "0001_foundation"
+                else 13
+                if previous == "0011_accounting_foundation"
                 else 8
                 if previous == "0010_model_registry"
                 else 7
@@ -162,7 +269,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
     with engine.begin() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
-            == "0011_accounting_foundation"
+            == "0012_reservation_transactions"
         )
         assert (
             connection.execute(
@@ -215,6 +322,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
         "0008_tenant_policies",
         "0009_model_catalog",
         "0010_model_registry",
+        "0011_accounting_foundation",
     ],
 )
 def test_upgrade_preserves_existing_tenant_and_audit(
