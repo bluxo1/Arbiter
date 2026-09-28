@@ -743,7 +743,7 @@ def test_future_settlement_shapes_with_matching_evidence(ledger: Ledger, state: 
     values = ledger.values()
     undispatched = state in {"released", "rejected_capacity"}
     kind, disposition = ("release", "released") if undispatched else ("commit", "committed")
-    terminal = state in {"succeeded", "failed", "released", "rejected_capacity"}
+    terminal = state in {"succeeded", "failed", "unknown"}
     outcome = {
         "dispatched": None,
         "succeeded": "succeeded",
@@ -769,22 +769,66 @@ def test_future_settlement_shapes_with_matching_evidence(ledger: Ledger, state: 
                 "id": values["reservation"],
             },
         )
-        connection.execute(
-            text("""
-            UPDATE arbiter.requests SET state=:state,outcome=:outcome,
-                dispatched_at=CASE WHEN :dispatched THEN CURRENT_TIMESTAMP ELSE NULL END,
-                finished_at=CASE WHEN :terminal THEN CURRENT_TIMESTAMP ELSE NULL END
-            WHERE tenant_id=:tenant AND id=:id
-        """),
-            {
-                "state": state,
-                "outcome": outcome,
-                "dispatched": not undispatched,
-                "terminal": terminal,
-                "tenant": ledger.tenants[0],
-                "id": values["request"],
-            },
-        )
+        if not undispatched:
+            dispatch_audit = uuid4()
+            connection.execute(
+                text("""
+                INSERT INTO arbiter.audit_events
+                    (id,tenant_id,actor_type,actor_reference,actor_api_key_id,action,
+                     target_id,policy_revision,request_id,occurred_at,outcome)
+                SELECT :audit,r.tenant_id,'api_key',r.key_id::text,r.key_id,
+                    'request_dispatched',r.id,r.policy_revision,r.id,
+                    CURRENT_TIMESTAMP,'succeeded'
+                FROM arbiter.requests r WHERE r.tenant_id=:tenant AND r.id=:request
+            """),
+                {**values, "audit": dispatch_audit},
+            )
+            connection.execute(
+                text("""
+                UPDATE arbiter.requests SET state='dispatched',
+                    dispatched_at=CURRENT_TIMESTAMP,dispatch_audit_id=:audit
+                WHERE tenant_id=:tenant AND id=:request
+            """),
+                {**values, "audit": dispatch_audit},
+            )
+        if terminal and not undispatched:
+            terminal_audit = uuid4()
+            connection.execute(
+                text("""
+                INSERT INTO arbiter.audit_events
+                    (id,tenant_id,actor_type,actor_reference,actor_api_key_id,action,
+                     target_id,policy_revision,request_id,occurred_at,outcome)
+                SELECT :audit,r.tenant_id,'api_key',r.key_id::text,r.key_id,
+                    'request_finalized',r.id,r.policy_revision,r.id,
+                    CURRENT_TIMESTAMP,'succeeded'
+                FROM arbiter.requests r WHERE r.tenant_id=:tenant AND r.id=:request
+            """),
+                {**values, "audit": terminal_audit},
+            )
+            connection.execute(
+                text("""
+                UPDATE arbiter.requests SET state=:state,outcome=:outcome,
+                    finished_at=CASE WHEN :finished THEN CURRENT_TIMESTAMP ELSE NULL END,
+                    terminal_audit_id=:audit
+                WHERE tenant_id=:tenant AND id=:request
+            """),
+                {
+                    **values,
+                    "state": state,
+                    "outcome": outcome,
+                    "finished": state != "unknown",
+                    "audit": terminal_audit,
+                },
+            )
+        elif undispatched:
+            connection.execute(
+                text("""
+                UPDATE arbiter.requests SET state=:state,outcome=:outcome,
+                    finished_at=CURRENT_TIMESTAMP
+                WHERE tenant_id=:tenant AND id=:request
+            """),
+                {**values, "state": state, "outcome": outcome},
+            )
         connection.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
         transaction.rollback()
 

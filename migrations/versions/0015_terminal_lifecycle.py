@@ -85,6 +85,8 @@ def upgrade() -> None:
         LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog AS $$
         BEGIN
             IF OLD.state IN ('succeeded','failed','unknown') OR
+                (OLD.state='reserved' AND
+                    NEW.state NOT IN ('reserved','dispatched','released','rejected_capacity')) OR
                 (OLD.state='dispatched' AND NEW.state<>'dispatched' AND
                     (NEW.state NOT IN ('succeeded','failed','unknown') OR
                         NEW.terminal_audit_id IS NULL OR OLD.terminal_audit_id IS NOT NULL)) THEN
@@ -102,7 +104,9 @@ def upgrade() -> None:
     for table in ("requests", "reservations", "audit_events"):
         check = SCOPE
         if table == "requests":
-            check += " AND state IN ('succeeded','failed','unknown') AND terminal_audit_id IS NOT NULL"
+            check += (
+                " AND state IN ('succeeded','failed','unknown') AND terminal_audit_id IS NOT NULL"
+            )
         elif table == "audit_events":
             check += " AND actor_type='api_key' AND action='request_finalized'"
         op.execute(f"""

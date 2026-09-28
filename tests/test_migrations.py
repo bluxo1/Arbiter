@@ -26,6 +26,7 @@ from arbiter.governance.capacity import CapacityGate, CapacityService
 from arbiter.governance.dispatch import DispatchService
 from arbiter.governance.release import ReleaseService
 from arbiter.persistence.workload import KeyBinding
+from arbiter.providers.double import DeterministicProvider
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("ARBITER_TEST_MIGRATIONS") != "1",
@@ -149,7 +150,7 @@ def test_dispatch_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0014_dispatch_authorization"
+                == "0015_terminal_lifecycle"
             )
             set_context(connection, actor.tenant)
             assert connection.execute(
@@ -159,6 +160,83 @@ def test_dispatch_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
             """),
                 {"tenant": actor.tenant, "request": lease.result.request_id},
             ).one() == ("dispatched", True)
+    finally:
+        runtime.dispose()
+        operator.dispose()
+
+
+def test_terminal_upgrade_preserves_dispatched_request_and_refuses_evidence_loss(
+    disposable_database: Engine,
+) -> None:
+    engine = disposable_database
+    migrate_to(engine, "0014_dispatch_authorization")
+    settings = DatabaseSettings()
+    runtime, operator = (
+        create_engine(
+            settings.url(role).set(database=engine.url.database),
+            poolclass=NullPool,
+            hide_parameters=True,
+        )
+        for role in ("runtime", "operator")
+    )
+    model, alias = uuid4(), "terminal-migration-" + uuid4().hex
+    store = ReservationStore(runtime, operator, engine, model, alias)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("""
+                INSERT INTO arbiter.provider_models
+                    (id,alias,adapter,model_digest,context_cap,output_cap,credit_charge,
+                     revision,active)
+                VALUES (:id,:alias,'ollama',:digest,4096,256,10,1,true)
+            """),
+                {"id": model, "alias": alias, "digest": "sha256:" + "d" * 64},
+            )
+        actor, gate, original = store.actor(), CapacityGate(1), store.request()
+        lease = CapacityService(store.service(), ReleaseService(runtime), gate).reserve_and_acquire(
+            actor.credential, uuid4().hex, original
+        )
+        DispatchService(runtime).authorize(lease)
+        with engine.begin() as connection:
+            set_context(connection, actor.tenant)
+            previous: str = connection.execute(
+                text("""
+                SELECT to_jsonb(r)::text FROM arbiter.requests r
+                WHERE tenant_id=:tenant AND id=:request
+            """),
+                {"tenant": actor.tenant, "request": lease.result.request_id},
+            ).scalar_one()
+        migrate_to(engine, "head")
+        with engine.begin() as connection:
+            set_context(connection, actor.tenant)
+            assert (
+                connection.execute(
+                    text("""
+                SELECT (to_jsonb(r)-ARRAY['terminal_audit_id','terminal_action'])::text
+                FROM arbiter.requests r WHERE tenant_id=:tenant AND id=:request
+            """),
+                    {"tenant": actor.tenant, "request": lease.result.request_id},
+                ).scalar_one()
+                == previous
+            )
+        result = DispatchService(runtime).run_double_once(
+            lease,
+            original,
+            DeterministicProvider(model, "sha256:" + "d" * 64, 256),
+            store.fingerprint,
+        )
+        assert result.state == "succeeded" and store.totals(actor) == (1, 0, 10, 0)
+        assert gate.occupied == 0
+        with pytest.raises(DBAPIError) as failure:
+            migrate_to(engine, "0014_dispatch_authorization", downgrade=True)
+        assert postgres_error(failure.value).sqlstate == "23514"
+        with engine.begin() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT version_num FROM public.alembic_version")
+                ).scalar_one()
+                == "0015_terminal_lifecycle"
+            )
     finally:
         runtime.dispose()
         operator.dispose()
@@ -210,7 +288,8 @@ def test_release_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
                 text("""
                 SELECT release_audit_id,
                     (to_jsonb(r)-ARRAY['release_audit_id','release_action',
-                        'dispatch_audit_id','dispatch_action'])::text
+                        'dispatch_audit_id','dispatch_action',
+                        'terminal_audit_id','terminal_action'])::text
                 FROM arbiter.requests r WHERE tenant_id=:t AND id=:id
             """),
                 {"t": actor.tenant, "id": result.request_id},
@@ -230,7 +309,7 @@ def test_release_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0014_dispatch_authorization"
+                == "0015_terminal_lifecycle"
             )
             set_context(connection, actor.tenant)
             assert connection.execute(
@@ -321,7 +400,8 @@ def test_reservation_upgrade_preserves_legacy_evidence_and_blocks_lossy_downgrad
                 SELECT (to_jsonb(r)-ARRAY[
                     'reservation_audit_id','audit_action','audit_outcome',
                     'release_audit_id','release_action',
-                    'dispatch_audit_id','dispatch_action'])::text
+                    'dispatch_audit_id','dispatch_action',
+                    'terminal_audit_id','terminal_action'])::text
                 FROM arbiter.requests r WHERE tenant_id=:tenant AND id=:id
             """),
                 {"tenant": actor.tenant, "id": values["request"]},
@@ -340,7 +420,7 @@ def test_reservation_upgrade_preserves_legacy_evidence_and_blocks_lossy_downgrad
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0014_dispatch_authorization"
+                == "0015_terminal_lifecycle"
             )
     finally:
         runtime.dispose()
@@ -396,6 +476,7 @@ def test_registry_upgrade_preserves_legacy_configuration_without_fabricating_aud
         "0011_accounting_foundation",
         "0012_reservation_transactions",
         "0013_undispatched_release",
+        "0014_dispatch_authorization",
     ],
 )
 def test_migration_empty_and_previous_then_repeat_and_round_trip(
@@ -416,6 +497,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
                     "0011_accounting_foundation",
                     "0012_reservation_transactions",
                     "0013_undispatched_release",
+                    "0014_dispatch_authorization",
                 }
                 else 8
                 if previous == "0010_model_registry"
@@ -431,7 +513,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
     with engine.begin() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
-            == "0014_dispatch_authorization"
+            == "0015_terminal_lifecycle"
         )
         assert (
             connection.execute(

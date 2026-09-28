@@ -22,12 +22,15 @@ from sqlalchemy.exc import DBAPIError
 from test_tenant_isolation import credential_engine, postgres_error, set_context
 
 from arbiter.config import DatabaseSettings
+from arbiter.governance.capacity import CapacityGate, CapacityService
+from arbiter.governance.dispatch import DispatchService
 from arbiter.governance.fingerprint import (
     Fingerprinter,
     InvalidReservation,
     Message,
     ReservationInput,
 )
+from arbiter.governance.release import ReleaseService
 from arbiter.governance.reservation import (
     IdempotencyConflict,
     ModelDenied,
@@ -46,6 +49,7 @@ from arbiter.persistence.policy import PolicyRepository
 from arbiter.persistence.reservation import ReservationRepository, ReservationResult
 from arbiter.persistence.tenant import bind_tenant_transaction, tenant_transaction
 from arbiter.persistence.workload import resolve_key
+from arbiter.providers.double import DeterministicProvider
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("ARBITER_TEST_DATABASE") != "1", reason="requires real PostgreSQL"
@@ -899,71 +903,26 @@ def test_deferred_commit_failure_cannot_return_success(store: ReservationStore) 
             )
 
 
-@pytest.mark.parametrize(
-    "state,finished", [("dispatched", False), ("unknown", False), ("unknown", True)]
-)
-def test_durable_occupancy_states(store: ReservationStore, state: str, finished: bool) -> None:
+@pytest.mark.parametrize("state", ["dispatched", "unknown"])
+def test_durable_occupancy_states(store: ReservationStore, state: str) -> None:
     actor = store.actor(concurrency=1)
-    result = reserve(store, actor)
-    # Owner-only deterministic predicate fixture, NOT application dispatch authorization.
-    with store.migration.begin() as connection:
-        set_context(connection, actor.tenant)
-        values = {
-            "tenant": actor.tenant,
-            "id": result.request_id,
-            "event": uuid4(),
-            "state": state,
-            "finished": finished,
-        }
-        connection.execute(
-            text("""
-            UPDATE arbiter.requests SET state=CAST(:state AS varchar),
-                dispatched_at=clock_timestamp(),
-                outcome=CASE WHEN :state='unknown' THEN 'unknown' ELSE NULL END,
-                finished_at=CASE WHEN :finished THEN clock_timestamp() ELSE NULL END
-            WHERE tenant_id=:tenant AND id=:id
-        """),
-            values,
-        )
-        connection.execute(
-            text("""
-            UPDATE arbiter.reservations SET disposition='committed',settlement_event_id=:event
-            WHERE tenant_id=:tenant AND request_id=:id
-        """),
-            values,
-        )
-        connection.execute(
-            text("""
-            INSERT INTO arbiter.accounting_events
-                (id,tenant_id,request_id,reservation_id,quota_window_id,budget_window_id,
-                 request_count,credits,kind)
-            SELECT :event,tenant_id,id,reservation_id,quota_window_id,budget_window_id,1,
-                credit_charge,'commit' FROM arbiter.requests WHERE tenant_id=:tenant AND id=:id
-        """),
-            values,
-        )
-        connection.execute(
-            text(
-                "UPDATE arbiter.quota_windows SET committed=committed+1,"
-                "reserved=reserved-1 WHERE tenant_id=:tenant"
-            ),
-            values,
-        )
-        connection.execute(
-            text(
-                "UPDATE arbiter.budget_windows SET committed=committed+10,"
-                "reserved=reserved-10 WHERE tenant_id=:tenant"
-            ),
-            values,
-        )
-    if finished:
+    gate = CapacityGate(limit=2)
+    original = store.request()
+    lease = CapacityService(
+        store.service(), ReleaseService(store.runtime), gate
+    ).reserve_and_acquire(actor.credential, uuid4().hex, original)
+    service = DispatchService(store.runtime)
+    service.authorize(lease)
+    if state == "unknown":
+        provider = DeterministicProvider(store.model, "sha256:" + "d" * 64, 256, mode="deadline")
+        completion = service.run_double_once(lease, original, provider, store.fingerprint)
+        assert completion.state == "unknown"
+        assert provider.calls == (lease.result.request_id,)
+    assert gate.occupied == 1
+    with pytest.raises(ReservationDenied) as failure:
         reserve(store, actor)
-        assert store.totals(actor) == (1, 1, 10, 10)
-    else:
-        with pytest.raises(ReservationDenied) as failure:
-            reserve(store, actor)
-        assert failure.value.code == "tenant_capacity"
-        assert store.totals(actor) == (1, 0, 10, 0)
+    assert failure.value.code == "tenant_capacity"
+    assert store.totals(actor) == (1, 0, 10, 0)
 
 
 def test_function_owner_is_nonlogin_scoped_and_narrow(store: ReservationStore) -> None:

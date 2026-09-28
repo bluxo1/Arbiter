@@ -1,6 +1,5 @@
 """Transient, non-streaming provider contract; no persistence or network policy here."""
 
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
@@ -13,9 +12,9 @@ from arbiter.governance.fingerprint import Message
 class ProviderRequest:
     model_id: UUID
     model_digest: str
+    correlation: UUID
     messages: tuple[Message, ...] = field(repr=False)
     max_output_tokens: int = 256
-    correlation: UUID = field(default_factory=lambda: UUID(int=0))
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,7 +28,7 @@ class ProviderResult:
 @dataclass(frozen=True, slots=True)
 class ProviderCapabilities:
     healthy: bool
-    model_ids: Sequence[UUID]
+    model_ids: tuple[UUID, ...]
     output_cap: int
 
 

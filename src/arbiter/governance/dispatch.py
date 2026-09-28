@@ -1,16 +1,22 @@
-"""Internal dispatch-authorization transaction; deliberately no provider call."""
+"""Internal dispatch and deterministic Phase 3 terminal lifecycle; no HTTP route."""
 
-from dataclasses import dataclass
+import hmac
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
 from arbiter.governance.capacity import CapacityLease, CapacityOwnershipError
+from arbiter.governance.fingerprint import Fingerprinter, ReservationInput
 from arbiter.identity.context import TenantContext
 from arbiter.persistence.dispatch import DispatchRepository
 from arbiter.persistence.release import ReleaseRepository, ReleaseResult
 from arbiter.persistence.tenant import tenant_transaction
+from arbiter.persistence.terminal import TerminalRepository
+from arbiter.providers.double import DeterministicProvider
+from arbiter.providers.port import ProviderDefiniteFailure, ProviderRequest, ProviderResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +46,38 @@ class DispatchRejected(Exception):
 class DispatchUnavailable(Exception):
     code = "unavailable"
     status_code = 503
+
+
+class TerminalUnavailable(Exception):
+    code = "unavailable"
+    status_code = 503
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderCompletion:
+    request_id: UUID
+    state: str
+    outcome: str
+    assistant_text: str | None = field(default=None, repr=False)
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
+def _valid_result(value: object, output_cap: int) -> ProviderResult:
+    if not isinstance(value, ProviderResult):
+        raise ValueError("malformed provider result")
+    if (
+        type(value.assistant_text) is not str
+        or len(value.assistant_text.encode("utf-8")) > 1048576
+        or value.finish_reason not in {"stop", "length"}
+    ):
+        raise ValueError("malformed provider result")
+    for count in (value.input_tokens, value.output_tokens):
+        if count is not None and (type(count) is not int or not 0 <= count <= 9223372036854775807):
+            raise ValueError("malformed provider telemetry")
+    if value.output_tokens is not None and value.output_tokens > output_cap:
+        raise ValueError("malformed provider telemetry")
+    return value
 
 
 class DispatchService:
@@ -84,3 +122,94 @@ class DispatchService:
             raise DispatchUnavailable() from None
         except (SQLAlchemyError, RuntimeError):
             raise DispatchUnavailable() from None
+
+    def run_double_once(
+        self,
+        lease: CapacityLease,
+        original: ReservationInput,
+        provider: DeterministicProvider,
+        fingerprinter: Fingerprinter,
+    ) -> ProviderCompletion:
+        """Call only the test double after an already-committed dispatch marker.
+
+        The original bounded content remains transient. A process-local one-shot claim
+        and the durable dispatched-state check prevent duplicate calls in this process;
+        restart recovery never calls this method automatically.
+        """
+        if (
+            not isinstance(lease, CapacityLease)
+            or not lease.owns()
+            or not isinstance(original, ReservationInput)
+            or not isinstance(provider, DeterministicProvider)
+            or not isinstance(fingerprinter, Fingerprinter)
+        ):
+            raise CapacityOwnershipError()
+        binding = lease._binding
+        request_id = lease.result.request_id
+        try:
+            with tenant_transaction(self._engine, TenantContext(binding.tenant_id)) as transaction:
+                snapshot = TerminalRepository(transaction).dispatched_snapshot(binding, request_id)
+        except (DBAPIError, SQLAlchemyError, RuntimeError):
+            raise TerminalUnavailable() from None
+        if snapshot is None:
+            raise DispatchConflict()
+        fingerprint = fingerprinter.compute(original)
+        if (
+            snapshot.model_alias != original.model_alias
+            or original.max_output_tokens > snapshot.output_cap
+            or fingerprint.version != snapshot.fingerprint_version
+            or not hmac.compare_digest(fingerprint.digest.get_secret_value(), snapshot.payload_hmac)
+        ):
+            raise DispatchConflict()
+        transient = ProviderRequest(
+            snapshot.model_id,
+            snapshot.model_digest,
+            request_id,
+            original.messages,
+            original.max_output_tokens,
+        )
+        try:
+            # Validation is explicitly non-inferencing. A known local mismatch
+            # cannot have reached generation and is a definite failed attempt.
+            provider.validate(transient)
+            validated = True
+        except Exception:
+            validated = False
+        if not lease._claim_provider_once():
+            raise DispatchConflict()
+        deadline = datetime.now(UTC) + timedelta(seconds=120)
+        text_value: str | None = None
+        input_tokens: int | None = None
+        output_tokens: int | None = None
+        if not validated:
+            state, outcome = "failed", "provider_failure"
+        else:
+            try:
+                # There is no open PostgreSQL transaction during this call.
+                response = _valid_result(
+                    provider.generate(transient, deadline), transient.max_output_tokens
+                )
+                state, outcome = "succeeded", "succeeded"
+                text_value = response.assistant_text
+                input_tokens, output_tokens = response.input_tokens, response.output_tokens
+            except ProviderDefiniteFailure:
+                state, outcome = "failed", "provider_failure"
+            except Exception:
+                # Deadline, malformed output and all inconclusive failures stay charged
+                # and quarantined. The exception object/body is never logged or stored.
+                state, outcome = "unknown", "unknown"
+        try:
+            with tenant_transaction(self._engine, TenantContext(binding.tenant_id)) as transaction:
+                changed = TerminalRepository(transaction).finalize(
+                    binding, request_id, state, outcome, input_tokens, output_tokens
+                )
+        except (DBAPIError, SQLAlchemyError, RuntimeError):
+            # The provider has already been called; never retry it. Keep capacity.
+            raise TerminalUnavailable() from None
+        if not changed:
+            raise DispatchConflict()
+        if state in {"succeeded", "failed"}:
+            lease._release_after_terminal(request_id, state)
+        return ProviderCompletion(
+            request_id, state, outcome, text_value, input_tokens, output_tokens
+        )

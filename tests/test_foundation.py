@@ -45,6 +45,18 @@ def test_no_tenant_or_provider_route(secret_directory: Path, path: str, tenant: 
         assert response.status_code == (405 if path == "/v1/models" else 404)
 
 
+def test_provider_invocation_stays_inside_dispatch_service() -> None:
+    package = Path(__file__).resolve().parents[1] / "src" / "arbiter"
+    callers = {
+        path.relative_to(package).as_posix()
+        for path in package.rglob("*.py")
+        if ".generate(" in path.read_text(encoding="utf-8")
+    }
+    assert callers == {"governance/dispatch.py"}
+    for path in (package / "transport").rglob("*.py"):
+        assert "arbiter.providers" not in path.read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
 def test_debug_documentation_disabled(secret_directory: Path, path: str) -> None:
     with TestClient(create_app()) as client:

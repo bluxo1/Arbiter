@@ -63,6 +63,4 @@ class DeterministicProvider:
             raise ProviderAmbiguous()
         if self._mode == "malformed":
             return ProviderResult("fixture response", finish_reason="invalid")
-        return ProviderResult(
-            "fixture response", self._input_tokens, self._output_tokens, "stop"
-        )
+        return ProviderResult("fixture response", self._input_tokens, self._output_tokens, "stop")
