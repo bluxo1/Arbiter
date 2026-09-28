@@ -58,6 +58,7 @@ class CapacityGate:
         self.limit = limit
         self._lock = Lock()
         self._owners: dict[tuple[UUID, UUID, UUID], object] = {}
+        self._provider_started: set[tuple[UUID, UUID, UUID]] = set()
 
     @property
     def occupied(self) -> int:
@@ -80,11 +81,22 @@ class CapacityGate:
             if self._owners.get(claim.identity) is not claim.nonce:
                 return False
             del self._owners[claim.identity]
+            self._provider_started.discard(claim.identity)
             return True
 
     def owns(self, claim: _Claim) -> bool:
         with self._lock:
             return self._owners.get(claim.identity) is claim.nonce
+
+    def claim_provider_once(self, claim: _Claim) -> bool:
+        """One local invocation claim; never reset it while this capacity owner lives."""
+        with self._lock:
+            if self._owners.get(claim.identity) is not claim.nonce:
+                return False
+            if claim.identity in self._provider_started:
+                return False
+            self._provider_started.add(claim.identity)
+            return True
 
 
 # One gate for the supported single-worker process. No route creates another.
@@ -115,6 +127,26 @@ class CapacityLease:
             raise CapacityOwnershipError()
         self._gate.release(self._claim)
         return released
+
+    def owns(self) -> bool:
+        return self._gate.owns(self._claim)
+
+    def _release_after_confirmed(self, released: ReleaseResult) -> None:
+        """Free only this claim after an outer transaction commits a release."""
+        if released.request_id != self.result.request_id or released.state not in {
+            "released",
+            "rejected_capacity",
+        }:
+            raise CapacityOwnershipError()
+        self._gate.release(self._claim)
+
+    def _claim_provider_once(self) -> bool:
+        return self._gate.claim_provider_once(self._claim)
+
+    def _release_after_terminal(self, request_id: UUID, state: str) -> bool:
+        if request_id != self.result.request_id or state not in {"succeeded", "failed"}:
+            raise CapacityOwnershipError()
+        return self._gate.release(self._claim)
 
     def prepare(self, action: Callable[[], None]) -> None:
         """Guard a synchronous pre-dispatch step, including cancellation.

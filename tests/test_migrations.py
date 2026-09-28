@@ -22,6 +22,8 @@ from test_reservation_transactions import ReservationStore
 from test_tenant_isolation import postgres_error, set_context
 
 from arbiter.config import DatabaseSettings
+from arbiter.governance.capacity import CapacityGate, CapacityService
+from arbiter.governance.dispatch import DispatchService
 from arbiter.governance.release import ReleaseService
 from arbiter.persistence.workload import KeyBinding
 
@@ -94,6 +96,74 @@ def migrate_to(engine: Engine, revision: str, *, downgrade: bool = False) -> Non
             command.upgrade(config, revision)
 
 
+def test_dispatch_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
+    disposable_database: Engine,
+) -> None:
+    engine = disposable_database
+    migrate_to(engine, "0013_undispatched_release")
+    settings = DatabaseSettings()
+    runtime, operator = (
+        create_engine(
+            settings.url(role).set(database=engine.url.database),
+            poolclass=NullPool,
+            hide_parameters=True,
+        )
+        for role in ("runtime", "operator")
+    )
+    model, alias = uuid4(), "dispatch-migration-" + uuid4().hex
+    store = ReservationStore(runtime, operator, engine, model, alias)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("""
+                INSERT INTO arbiter.provider_models
+                    (id,alias,adapter,model_digest,context_cap,output_cap,credit_charge,
+                     revision,active)
+                VALUES (:id,:alias,'ollama',:digest,4096,256,10,1,true)
+            """),
+                {"id": model, "alias": alias, "digest": "sha256:" + "d" * 64},
+            )
+        actor = store.actor()
+        gate = CapacityGate(1)
+        lease = CapacityService(store.service(), ReleaseService(runtime), gate).reserve_and_acquire(
+            actor.credential, uuid4().hex, store.request()
+        )
+        assert store.totals(actor) == (0, 1, 0, 10)
+        migrate_to(engine, "head")
+        with engine.begin() as connection:
+            set_context(connection, actor.tenant)
+            assert connection.execute(
+                text("""
+                SELECT state,dispatch_audit_id FROM arbiter.requests
+                WHERE tenant_id=:tenant AND id=:request
+            """),
+                {"tenant": actor.tenant, "request": lease.result.request_id},
+            ).one() == ("reserved", None)
+        DispatchService(runtime).authorize(lease)
+        assert store.totals(actor) == (1, 0, 10, 0) and gate.occupied == 1
+        with pytest.raises(DBAPIError) as failure:
+            migrate_to(engine, "0013_undispatched_release", downgrade=True)
+        assert postgres_error(failure.value).sqlstate == "23514"
+        with engine.begin() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT version_num FROM public.alembic_version")
+                ).scalar_one()
+                == "0014_dispatch_authorization"
+            )
+            set_context(connection, actor.tenant)
+            assert connection.execute(
+                text("""
+                SELECT state,dispatch_audit_id IS NOT NULL FROM arbiter.requests
+                WHERE tenant_id=:tenant AND id=:request
+            """),
+                {"tenant": actor.tenant, "request": lease.result.request_id},
+            ).one() == ("dispatched", True)
+    finally:
+        runtime.dispose()
+        operator.dispose()
+
+
 def test_release_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
     disposable_database: Engine,
 ) -> None:
@@ -139,7 +209,8 @@ def test_release_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
             row = connection.execute(
                 text("""
                 SELECT release_audit_id,
-                    (to_jsonb(r)-ARRAY['release_audit_id','release_action'])::text
+                    (to_jsonb(r)-ARRAY['release_audit_id','release_action',
+                        'dispatch_audit_id','dispatch_action'])::text
                 FROM arbiter.requests r WHERE tenant_id=:t AND id=:id
             """),
                 {"t": actor.tenant, "id": result.request_id},
@@ -159,7 +230,7 @@ def test_release_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0013_undispatched_release"
+                == "0014_dispatch_authorization"
             )
             set_context(connection, actor.tenant)
             assert connection.execute(
@@ -249,7 +320,8 @@ def test_reservation_upgrade_preserves_legacy_evidence_and_blocks_lossy_downgrad
                 text("""
                 SELECT (to_jsonb(r)-ARRAY[
                     'reservation_audit_id','audit_action','audit_outcome',
-                    'release_audit_id','release_action'])::text
+                    'release_audit_id','release_action',
+                    'dispatch_audit_id','dispatch_action'])::text
                 FROM arbiter.requests r WHERE tenant_id=:tenant AND id=:id
             """),
                 {"tenant": actor.tenant, "id": values["request"]},
@@ -268,7 +340,7 @@ def test_reservation_upgrade_preserves_legacy_evidence_and_blocks_lossy_downgrad
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0013_undispatched_release"
+                == "0014_dispatch_authorization"
             )
     finally:
         runtime.dispose()
@@ -323,6 +395,7 @@ def test_registry_upgrade_preserves_legacy_configuration_without_fabricating_aud
         "0010_model_registry",
         "0011_accounting_foundation",
         "0012_reservation_transactions",
+        "0013_undispatched_release",
     ],
 )
 def test_migration_empty_and_previous_then_repeat_and_round_trip(
@@ -338,7 +411,12 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
                 0
                 if previous == "0001_foundation"
                 else 13
-                if previous in {"0011_accounting_foundation", "0012_reservation_transactions"}
+                if previous
+                in {
+                    "0011_accounting_foundation",
+                    "0012_reservation_transactions",
+                    "0013_undispatched_release",
+                }
                 else 8
                 if previous == "0010_model_registry"
                 else 7
@@ -353,7 +431,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
     with engine.begin() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
-            == "0013_undispatched_release"
+            == "0014_dispatch_authorization"
         )
         assert (
             connection.execute(

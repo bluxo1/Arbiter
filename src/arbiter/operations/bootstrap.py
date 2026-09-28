@@ -11,6 +11,8 @@ KEY_ROLE = "arbiter_key_writer"
 KEY_LOOKUP_ROLE = "arbiter_key_lookup"
 RESERVATION_ROLE = "arbiter_reservation_writer"
 RELEASE_ROLE = "arbiter_release_writer"
+DISPATCH_ROLE = "arbiter_dispatch_writer"
+TERMINAL_ROLE = "arbiter_terminal_writer"
 
 
 def bootstrap(settings: DatabaseSettings) -> None:
@@ -42,7 +44,15 @@ def bootstrap(settings: DatabaseSettings) -> None:
                 (name,),
             ).fetchall()
             allowed = (
-                {LOOKUP_ROLE, KEY_ROLE, KEY_LOOKUP_ROLE, RESERVATION_ROLE, RELEASE_ROLE}
+                {
+                    LOOKUP_ROLE,
+                    KEY_ROLE,
+                    KEY_LOOKUP_ROLE,
+                    RESERVATION_ROLE,
+                    RELEASE_ROLE,
+                    DISPATCH_ROLE,
+                    TERMINAL_ROLE,
+                }
                 if role == "migration"
                 else set()
             )
@@ -170,6 +180,52 @@ def bootstrap(settings: DatabaseSettings) -> None:
         )
         connection.execute(
             "GRANT arbiter_release_writer TO arbiter_migration WITH INHERIT FALSE, SET TRUE"
+        )
+        if (
+            connection.execute(
+                "SELECT 1 FROM pg_roles WHERE rolname=%s", (DISPATCH_ROLE,)
+            ).fetchone()
+            is None
+        ):
+            connection.execute("CREATE ROLE arbiter_dispatch_writer")
+        if (
+            connection.execute(
+                "SELECT 1 FROM pg_auth_members WHERE member="
+                "(SELECT oid FROM pg_roles WHERE rolname=%s)",
+                (DISPATCH_ROLE,),
+            ).fetchone()
+            is not None
+        ):
+            raise ValueError("unexpected dispatch owner membership")
+        connection.execute(
+            "ALTER ROLE arbiter_dispatch_writer WITH NOLOGIN NOSUPERUSER NOCREATEDB "
+            "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL"
+        )
+        connection.execute(
+            "GRANT arbiter_dispatch_writer TO arbiter_migration WITH INHERIT FALSE, SET TRUE"
+        )
+        if (
+            connection.execute(
+                "SELECT 1 FROM pg_roles WHERE rolname=%s", (TERMINAL_ROLE,)
+            ).fetchone()
+            is None
+        ):
+            connection.execute("CREATE ROLE arbiter_terminal_writer")
+        if (
+            connection.execute(
+                "SELECT 1 FROM pg_auth_members WHERE member="
+                "(SELECT oid FROM pg_roles WHERE rolname=%s)",
+                (TERMINAL_ROLE,),
+            ).fetchone()
+            is not None
+        ):
+            raise ValueError("unexpected terminal owner membership")
+        connection.execute(
+            "ALTER ROLE arbiter_terminal_writer WITH NOLOGIN NOSUPERUSER NOCREATEDB "
+            "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL"
+        )
+        connection.execute(
+            "GRANT arbiter_terminal_writer TO arbiter_migration WITH INHERIT FALSE, SET TRUE"
         )
         connection.execute(
             sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(sql.Identifier(settings.name))
