@@ -1,0 +1,1 @@
+user default reset on nopass ~arbiter:rate:* +ping +info +eval +time +get +set +exists +zadd +zremrangebyscore +zcard +zscore +zrange +type +pexpire +pttl +del

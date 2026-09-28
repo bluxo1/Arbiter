@@ -10,6 +10,17 @@ from arbiter.identity.keys import InvalidKey, KeyCandidate
 from arbiter.persistence.tenant import TenantTransaction
 from arbiter.persistence.workload import KeyBinding
 
+_RAW_RESERVE = text("""
+    SELECT request_id,state,model_alias,credit_charge,policy_revision,model_revision,duplicate
+    FROM arbiter.reserve_request(:tenant,:key,:public,:candidate,:pepper,
+        :idempotency,:fingerprint,:version,:alias,:output)
+""")
+_GOVERNED_RESERVE = text("""
+    SELECT request_id,state,model_alias,credit_charge,policy_revision,model_revision,duplicate
+    FROM arbiter.reserve_request_governed(:tenant,:key,:public,:candidate,:pepper,
+        :idempotency,:fingerprint,:version,:alias,:output,:policy_revision)
+""")
+
 
 @dataclass(frozen=True, slots=True)
 class ReservationResult:
@@ -35,17 +46,40 @@ class ReservationRepository:
         alias: str,
         output_cap: int,
     ) -> ReservationResult:
+        return self._reserve(binding, candidate, idempotency, fingerprint, alias, output_cap, None)
+
+    def reserve_governed(
+        self,
+        binding: KeyBinding,
+        candidate: KeyCandidate,
+        idempotency: str,
+        fingerprint: PayloadFingerprint,
+        alias: str,
+        output_cap: int,
+        policy_revision: int,
+    ) -> ReservationResult:
+        if type(policy_revision) is not int or policy_revision < 1:
+            raise ValueError("invalid policy revision")
+        return self._reserve(
+            binding, candidate, idempotency, fingerprint, alias, output_cap, policy_revision
+        )
+
+    def _reserve(
+        self,
+        binding: KeyBinding,
+        candidate: KeyCandidate,
+        idempotency: str,
+        fingerprint: PayloadFingerprint,
+        alias: str,
+        output_cap: int,
+        policy_revision: int | None,
+    ) -> ReservationResult:
         if binding.tenant_id != self._transaction.context.tenant_id:
             raise InvalidKey()
         row = (
             self._transaction.connection()
             .execute(
-                text("""
-            SELECT request_id,state,model_alias,credit_charge,
-                policy_revision,model_revision,duplicate
-            FROM arbiter.reserve_request(:tenant,:key,:public,:candidate,:pepper,
-                :idempotency,:fingerprint,:version,:alias,:output)
-        """),
+                _RAW_RESERVE if policy_revision is None else _GOVERNED_RESERVE,
                 {
                     "tenant": self._transaction.context.tenant_id,
                     "key": binding.key_id,
@@ -57,6 +91,7 @@ class ReservationRepository:
                     "version": fingerprint.version,
                     "alias": alias,
                     "output": output_cap,
+                    "policy_revision": policy_revision,
                 },
             )
             .one()

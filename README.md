@@ -1,6 +1,7 @@
 # Arbiter
 
-Phase 1/2 foundation and bounded Phase 3 accounting, reservation and undispatched release. Read
+Phase 1/2 foundation and bounded Phase 3 accounting, reservation, dispatch, terminal
+lifecycle and Redis rate governance. Read
 [the agent workflow](docs/Agents.md) and [project memory](docs/Memory.md) before changes.
 The API exposes health, authenticated tenant audit reads, admin key creation/listing/revocation,
 and tenant-approved model catalogs for OIDC members/admins and workload API keys. Liveness returns 200;
@@ -15,7 +16,14 @@ capability owned by a non-login, non-bypass role. The internal transaction reval
 serializes quota/budget/concurrency checks, and commits the request, reservation, accounting
 and API-key audit evidence together. Matching retries return prior-admission metadata; conflicting
 fingerprints fail without allocating again. Secrets and message content are never persisted.
-No complete admission pipeline, rate limiter, dispatch, reconciliation or provider path exists yet.
+The internal Redis tenant/key rate gate runs after authenticated deduplication and before
+this reservation capability. It uses one Redis-server-time script and a 60-second
+process-incarnation recovery barrier. Migration `0016_rate_preflight` adds a restricted
+preflight capability that reads committed idempotency and rate policy before Redis;
+the locked reservation then rechecks the policy revision and authority. It does not
+reserve quota or credits before Redis accepts. The existing raw reservation
+component remains an internal PostgreSQL primitive for its established regression tests.
+No public admission or inference route exists.
 Migration `0013_undispatched_release` adds a separate restricted cleanup capability, using the
 verified in-flight key binding. It releases only reserved requests without a dispatch marker,
 restores the original windows' reserved totals, and commits terminal state, accounting and
@@ -197,9 +205,9 @@ check failed. Output contains only fixed check names and booleans. These checks
 do not prove the complete schema or replace migration/isolation tests. They never
 read tenant records or mutate Redis. Dependency details have no HTTP route.
 `foundation_ready=true` is distinct from application readiness: output always
-reports `ready=false` while identity, enforcement, recovery and model readiness
-gates remain unimplemented. Redis PING/AOF health does not establish limiter
-state or its future restart barrier. `/health/live` remains responsive during
+reports `ready=false` while the complete admission, recovery and model readiness
+gates remain unfinished. Redis PING/AOF health does not establish limiter
+state or satisfy its restart barrier. `/health/live` remains responsive during
 dependency outages; `/health/ready` remains a minimal 503 without network IO.
 
 For an isolated clean-stack check, use a separate Compose project name, fresh
@@ -431,8 +439,7 @@ Errors roll back policy, audit and tenant revision; output contains only IDs and
 revision after commit. ENABLE/FORCE RLS protects history; runtime may read only
 within established tenant context and cannot insert/update/delete policy records.
 
-No consumption/in-flight records or dispatch path exists yet. The local policy
-path fails closed if future accounting/request tables appear, until Phase 3 adds
-the documented locked consumption/occupancy checks. This prevents carrying a
-pre-admission updater forward as permission to lower limits beneath live usage.
-No quota/budget/rate enforcement, provider call or inference is enabled here.
+PostgreSQL consumption and in-flight records now exist. The local policy path
+must retain its locked consumption/occupancy checks when changing live limits.
+The Redis limiter is an internal admission component; no provider call or
+public inference is enabled.

@@ -150,7 +150,7 @@ def test_dispatch_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0015_terminal_lifecycle"
+                == "0016_rate_preflight"
             )
             set_context(connection, actor.tenant)
             assert connection.execute(
@@ -235,7 +235,7 @@ def test_terminal_upgrade_preserves_dispatched_request_and_refuses_evidence_loss
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0015_terminal_lifecycle"
+                == "0016_rate_preflight"
             )
     finally:
         runtime.dispose()
@@ -309,7 +309,7 @@ def test_release_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0015_terminal_lifecycle"
+                == "0016_rate_preflight"
             )
             set_context(connection, actor.tenant)
             assert connection.execute(
@@ -420,7 +420,7 @@ def test_reservation_upgrade_preserves_legacy_evidence_and_blocks_lossy_downgrad
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0015_terminal_lifecycle"
+                == "0016_rate_preflight"
             )
     finally:
         runtime.dispose()
@@ -477,6 +477,7 @@ def test_registry_upgrade_preserves_legacy_configuration_without_fabricating_aud
         "0012_reservation_transactions",
         "0013_undispatched_release",
         "0014_dispatch_authorization",
+        "0015_terminal_lifecycle",
     ],
 )
 def test_migration_empty_and_previous_then_repeat_and_round_trip(
@@ -498,6 +499,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
                     "0012_reservation_transactions",
                     "0013_undispatched_release",
                     "0014_dispatch_authorization",
+                    "0015_terminal_lifecycle",
                 }
                 else 8
                 if previous == "0010_model_registry"
@@ -513,7 +515,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
     with engine.begin() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
-            == "0015_terminal_lifecycle"
+            == "0016_rate_preflight"
         )
         assert (
             connection.execute(

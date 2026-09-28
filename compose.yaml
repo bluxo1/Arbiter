@@ -63,8 +63,13 @@ services:
 
   redis:
     image: redis:7.2.16-bookworm@sha256:0637954999d01b7c9ce9167db2da50656e2590d3b884f1c600c5f63bb6e6773c
-    command: [redis-server, --appendonly, "yes", --appendfsync, always, --maxmemory, 64mb, --maxmemory-policy, noeviction]
-    volumes: [redis_data:/data]
+    command: [redis-server, --appendonly, "yes", --appendfsync, always, --maxmemory, 64mb, --maxmemory-policy, noeviction, --aclfile, /etc/redis/redis.acl]
+    volumes:
+      - redis_data:/data
+      - type: bind
+        source: ./deploy/redis.acl
+        target: /etc/redis/redis.acl
+        read_only: true
     networks: [control]
     mem_limit: 128m
     cpus: 1
