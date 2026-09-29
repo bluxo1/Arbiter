@@ -42,7 +42,8 @@ def test_health_stays_fail_closed(secret_directory: Path) -> None:
 def test_no_tenant_or_provider_route(secret_directory: Path, path: str, tenant: str) -> None:
     with TestClient(create_app()) as client:
         response = client.post(path, headers={"X-Tenant-ID": tenant}, json={"tenant_id": tenant})
-        assert response.status_code == (405 if path == "/v1/models" else 404)
+        # GET-only metadata routes reject POST with 405; inference remains absent.
+        assert response.status_code == (405 if path in {"/v1/models", "/v1/usage"} else 404)
 
 
 def test_provider_invocation_stays_inside_dispatch_service() -> None:
@@ -71,7 +72,9 @@ def test_missing_runtime_secret_prevents_start(
         pass
 
 
-def test_runtime_secret_does_not_supply_privileged_credentials(secret_directory: Path) -> None:
+def test_runtime_secret_does_not_supply_privileged_credentials(
+    secret_directory: Path,
+) -> None:
     settings = DatabaseSettings()
     assert settings.url("runtime").username == "arbiter_runtime"
     assert settings.password("runtime").get_secret_value() not in str(settings.url("runtime"))
@@ -95,7 +98,10 @@ def test_missing_cursor_secret_prevents_start(secret_directory: Path) -> None:
 
 def test_invalid_cursor_secret_prevents_start(secret_directory: Path) -> None:
     (secret_directory / "audit_cursor_key").write_text("invalid-base64")
-    with pytest.raises(ValueError, match="invalid audit cursor key file"), TestClient(create_app()):
+    with (
+        pytest.raises(ValueError, match="invalid audit cursor key file"),
+        TestClient(create_app()),
+    ):
         pass
 
 
@@ -108,7 +114,10 @@ def test_missing_pepper_prevents_start(secret_directory: Path) -> None:
 @pytest.mark.parametrize("value", [b"invalid-base64", base64.b64encode(bytes(31)), b"x" * 129])
 def test_invalid_pepper_prevents_start(secret_directory: Path, value: bytes) -> None:
     (secret_directory / "api_key_pepper").write_bytes(value)
-    with pytest.raises(ValueError, match="invalid API key pepper file"), TestClient(create_app()):
+    with (
+        pytest.raises(ValueError, match="invalid API key pepper file"),
+        TestClient(create_app()),
+    ):
         pass
 
 

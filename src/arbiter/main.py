@@ -27,6 +27,7 @@ from arbiter.transport.audit import router as audit_router
 from arbiter.transport.health import router as health_router
 from arbiter.transport.keys import router as key_router
 from arbiter.transport.models import router as model_router
+from arbiter.transport.usage import router as usage_router
 
 
 def _resources() -> tuple[
@@ -141,4 +142,6 @@ def create_app(
     app.include_router(audit_router)
     app.include_router(key_router)
     app.include_router(model_router)
+    # P3-2 metadata reads only; management_usage state wiring is a separate integration step.
+    app.include_router(usage_router)
     return app
