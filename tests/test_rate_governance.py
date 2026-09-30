@@ -221,9 +221,15 @@ def test_interrupted_paired_write_marker_requires_recovery() -> None:
 
 
 @pytest.mark.skipif(
-    os.environ.get("ARBITER_TEST_REDIS_RESTARTED") != "1", reason="requires host restart step"
+    os.environ.get("ARBITER_TEST_REDIS_RESTARTED") != "1"
+    and os.environ.get("ARBITER_TEST_EXIT_HOST") != "1",
+    reason="requires host restart step",
 )
 def test_process_restart_requires_new_full_barrier() -> None:
+    if os.environ.get("ARBITER_TEST_EXIT_HOST") == "1":
+        from phase3_exit_host import request_host
+
+        request_host("redis_restart")
     # Run only immediately after the host has restarted this test Redis process.
     actor = binding()
     assert _unavailable(actor)
