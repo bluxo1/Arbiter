@@ -218,3 +218,20 @@ class DispatchService:
         return ProviderCompletion(
             request_id, state, outcome, text_value, input_tokens, output_tokens
         )
+
+    def mark_unknown(self, lease: CapacityLease) -> bool:
+        """Quarantine interrupted dispatched work without invoking the provider."""
+        if not isinstance(lease, CapacityLease) or not lease.owns():
+            raise CapacityOwnershipError()
+        binding = lease._binding
+        request_id = lease.result.request_id
+        lease._quarantine_unknown()
+        try:
+            with tenant_transaction(self._engine, TenantContext(binding.tenant_id)) as transaction:
+                return TerminalRepository(transaction).finalize(
+                    binding, request_id, "unknown", "unknown", None, None
+                )
+        except (DBAPIError, SQLAlchemyError, RuntimeError):
+            # A failed commit keeps the claim quarantined. Recovery will settle
+            # any remaining dispatched row; it must never call the provider.
+            raise TerminalUnavailable() from None
