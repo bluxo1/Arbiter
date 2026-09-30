@@ -5,7 +5,7 @@ import ssl
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from anyio import to_thread
+from anyio import create_task_group, sleep, to_thread
 from fastapi import FastAPI
 from sqlalchemy.engine import Engine
 
@@ -21,7 +21,14 @@ from arbiter.operations.audit import AuditService
 from arbiter.operations.key_listing import KeyListService
 from arbiter.operations.key_revocation import KeyRevocationService
 from arbiter.operations.keys import KeyService
+from arbiter.operations.maintenance import (
+    CADENCE_SECONDS,
+    MaintenanceService,
+    MaintenanceUnavailable,
+)
 from arbiter.operations.models import ManagementModels, ModelCatalog
+from arbiter.operations.usage import ManagementUsage
+from arbiter.persistence.maintenance import maintenance_engine
 from arbiter.persistence.tenant import runtime_engine
 from arbiter.transport.audit import router as audit_router
 from arbiter.transport.health import router as health_router
@@ -31,6 +38,7 @@ from arbiter.transport.usage import router as usage_router
 
 
 def _resources() -> tuple[
+    Engine,
     Engine,
     OidcSettings,
     ssl.SSLContext,
@@ -54,6 +62,7 @@ def _resources() -> tuple[
     issuer = KeyIssuer(pepper, keys.pepper_version)
     return (
         runtime_engine(DatabaseSettings()),
+        maintenance_engine(DatabaseSettings()),
         settings,
         trust,
         cursors,
@@ -75,6 +84,15 @@ def create_app(
     model_catalog: ModelCatalog | None = None,
 ) -> FastAPI:
     """Optional explicit service wiring is for host-side tests, never request input."""
+
+    async def maintain(service: MaintenanceService) -> None:
+        while True:
+            await sleep(CADENCE_SECONDS)
+            try:
+                await to_thread.run_sync(service.run_once)
+            except MaintenanceUnavailable:
+                # The service has closed recovery admission and retries next cycle.
+                pass
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -101,6 +119,7 @@ def create_app(
             return
         (
             engine,
+            discovery,
             settings,
             trust,
             cursors,
@@ -119,9 +138,22 @@ def create_app(
                 app.state.workload_access = WorkloadAccess(key_verifier, engine)
                 app.state.model_catalog = catalog
                 app.state.management_models = ManagementModels(access, catalog)
-                yield
+                app.state.management_usage = ManagementUsage(access)
+                maintenance = MaintenanceService(engine, discovery)
+                app.state.maintenance_service = maintenance
+                try:
+                    await to_thread.run_sync(maintenance.run_once)
+                except MaintenanceUnavailable:
+                    pass
+                async with create_task_group() as tasks:
+                    tasks.start_soon(maintain, maintenance)
+                    try:
+                        yield
+                    finally:
+                        tasks.cancel_scope.cancel()
         finally:
             await to_thread.run_sync(engine.dispose)
+            await to_thread.run_sync(discovery.dispose)
             if hasattr(app.state, "audit_service"):
                 del app.state.audit_service
             if hasattr(app.state, "key_service"):
@@ -136,12 +168,15 @@ def create_app(
                 del app.state.model_catalog
             if hasattr(app.state, "management_models"):
                 del app.state.management_models
+            if hasattr(app.state, "management_usage"):
+                del app.state.management_usage
+            if hasattr(app.state, "maintenance_service"):
+                del app.state.maintenance_service
 
     app = FastAPI(debug=False, docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.include_router(health_router)
     app.include_router(audit_router)
     app.include_router(key_router)
     app.include_router(model_router)
-    # P3-2 metadata reads only; management_usage state wiring is a separate integration step.
     app.include_router(usage_router)
     return app

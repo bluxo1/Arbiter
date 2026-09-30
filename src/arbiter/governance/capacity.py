@@ -1,8 +1,8 @@
 """One process-local, nonqueueing capacity gate after durable reservation.
 
 This module does not authorize dispatch or infer durable accounting from slots.
-An acquired slot remains owned until PostgreSQL proves a pre-dispatch release;
-future dispatched/unknown handling must transfer that ownership explicitly.
+The dispatch commit transfers a claim from its handler to supervised work.
+Unknown claims are quarantined until audited operator clearance.
 """
 
 from collections.abc import Callable
@@ -59,15 +59,29 @@ class CapacityGate:
         self._lock = Lock()
         self._owners: dict[tuple[UUID, UUID, UUID], object] = {}
         self._provider_started: set[tuple[UUID, UUID, UUID]] = set()
+        self._dispatched: set[tuple[UUID, UUID, UUID]] = set()
+        self._quarantined: set[tuple[UUID, UUID, UUID]] = set()
+        self._ready = True
 
     @property
     def occupied(self) -> int:
         with self._lock:
             return len(self._owners)
 
+    @property
+    def ready(self) -> bool:
+        with self._lock:
+            return self._ready
+
+    def set_recovery_ready(self, ready: bool) -> None:
+        with self._lock:
+            self._ready = ready and not self._quarantined
+
     def try_acquire(self, binding: KeyBinding, request_id: UUID) -> _Claim | None:
         identity = (binding.tenant_id, binding.key_id, request_id)
         with self._lock:
+            if not self._ready:
+                return None
             if identity in self._owners:
                 raise CapacityOwnershipError()
             if len(self._owners) >= self.limit:
@@ -80,8 +94,62 @@ class CapacityGate:
         with self._lock:
             if self._owners.get(claim.identity) is not claim.nonce:
                 return False
+            if claim.identity in self._dispatched or claim.identity in self._quarantined:
+                return False
             del self._owners[claim.identity]
             self._provider_started.discard(claim.identity)
+            return True
+
+    def transfer_after_dispatch(self, claim: _Claim) -> None:
+        with self._lock:
+            if self._owners.get(claim.identity) is not claim.nonce:
+                raise CapacityOwnershipError()
+            self._dispatched.add(claim.identity)
+
+    def quarantine(self, claim: _Claim) -> None:
+        with self._lock:
+            if self._owners.get(claim.identity) is not claim.nonce:
+                raise CapacityOwnershipError()
+            self._dispatched.add(claim.identity)
+            self._quarantined.add(claim.identity)
+            self._ready = False
+
+    def restore_unknown(self, identity: tuple[UUID, UUID, UUID]) -> None:
+        """Rebuild an effective capacity claim from durable, uncleared unknown work."""
+        with self._lock:
+            if identity not in self._owners:
+                self._owners[identity] = object()
+            self._dispatched.add(identity)
+            self._quarantined.add(identity)
+            self._ready = False
+
+    def release_reserved_identity(self, identity: tuple[UUID, UUID, UUID]) -> bool:
+        with self._lock:
+            if identity not in self._owners or identity in self._dispatched:
+                return False
+            del self._owners[identity]
+            self._provider_started.discard(identity)
+            return True
+
+    def release_cleared_unknown(self, identity: tuple[UUID, UUID, UUID]) -> bool:
+        with self._lock:
+            if identity not in self._quarantined:
+                return False
+            self._quarantined.remove(identity)
+            self._dispatched.discard(identity)
+            self._provider_started.discard(identity)
+            del self._owners[identity]
+            return True
+
+    def release_terminal(self, claim: _Claim) -> bool:
+        with self._lock:
+            if self._owners.get(claim.identity) is not claim.nonce:
+                return False
+            if claim.identity not in self._dispatched or claim.identity in self._quarantined:
+                raise CapacityOwnershipError()
+            self._dispatched.remove(claim.identity)
+            self._provider_started.discard(claim.identity)
+            del self._owners[claim.identity]
             return True
 
     def owns(self, claim: _Claim) -> bool:
@@ -101,6 +169,7 @@ class CapacityGate:
 
 # One gate for the supported single-worker process. No route creates another.
 process_capacity = CapacityGate()
+process_capacity.set_recovery_ready(False)
 
 
 class CapacityLease:
@@ -131,6 +200,12 @@ class CapacityLease:
     def owns(self) -> bool:
         return self._gate.owns(self._claim)
 
+    def _transfer_after_dispatch(self) -> None:
+        self._gate.transfer_after_dispatch(self._claim)
+
+    def _quarantine_unknown(self) -> None:
+        self._gate.quarantine(self._claim)
+
     def _release_after_confirmed(self, released: ReleaseResult) -> None:
         """Free only this claim after an outer transaction commits a release."""
         if released.request_id != self.result.request_id or released.state not in {
@@ -146,7 +221,7 @@ class CapacityLease:
     def _release_after_terminal(self, request_id: UUID, state: str) -> bool:
         if request_id != self.result.request_id or state not in {"succeeded", "failed"}:
             raise CapacityOwnershipError()
-        return self._gate.release(self._claim)
+        return self._gate.release_terminal(self._claim)
 
     def prepare(self, action: Callable[[], None]) -> None:
         """Guard a synchronous pre-dispatch step, including cancellation.

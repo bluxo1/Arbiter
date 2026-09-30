@@ -117,7 +117,7 @@ docker run --rm --network none --read-only --tmpfs /tmp arbiter-local:verificati
 
 Database foundation and tenant-isolation tests require the real migrated
 PostgreSQL instance, `ARBITER_TEST_DATABASE=1`, its network, and explicitly mounted
-runtime/operator/migration test credentials. Do not mount privileged test credentials
+runtime/operator/migration/maintenance test credentials. Do not mount privileged test credentials
 into the API. Tests exercise FORCE RLS, cross-tenant reads/writes/joins, composite
 relationships, immutable ownership, append-only audit grants, and pooled reuse.
 
@@ -127,6 +127,7 @@ docker run --rm --read-only --tmpfs /tmp --network arbiter_control `
   --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_runtime_password,target=/run/secrets/db_runtime_password,readonly" `
   --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_operator_password,target=/run/secrets/db_operator_password,readonly" `
   --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_migration_password,target=/run/secrets/db_migration_password,readonly" `
+  --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_maintenance_password,target=/run/secrets/db_maintenance_password,readonly" `
   arbiter-local:verification python -m pytest -q -p no:cacheprovider
 ```
 
@@ -138,6 +139,9 @@ docker run --rm --read-only --tmpfs /tmp --network arbiter_control `
   -e ARBITER_TEST_MIGRATIONS=1 `
   --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_bootstrap_password,target=/run/secrets/db_bootstrap_password,readonly" `
   --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_migration_password,target=/run/secrets/db_migration_password,readonly" `
+  --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_runtime_password,target=/run/secrets/db_runtime_password,readonly" `
+  --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_operator_password,target=/run/secrets/db_operator_password,readonly" `
+  --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_maintenance_password,target=/run/secrets/db_maintenance_password,readonly" `
   arbiter-local:verification python -m pytest -q -p no:cacheprovider tests/test_migrations.py
 ```
 
@@ -192,6 +196,27 @@ an individually authenticated human. Runtime cannot insert operator-labelled
 audit rows, invoke operator services, or change tenant/member state. No command
 adds an HTTP route or enables inference.
 
+The API runs a 10-second maintenance pass. It releases reservations older than
+30 seconds under the database state/row locks. At startup it marks prior
+nonterminal dispatched work `unknown`; that work retains effective capacity and
+blocks internal recovery admission. Before clearing an unknown request, the
+operator must verify that Ollama has no running work for it, stopping/restarting
+Ollama if needed. Record clearance only after that verification:
+
+```powershell
+docker compose --profile operations run --rm clearance `
+  python -m arbiter.operations.clearance `
+  --tenant '<tenant UUID>' --request '<unknown request UUID>' --provider-stopped
+```
+
+The separate operator credential records one content-free clearance audit in
+PostgreSQL and frees the tenant concurrency slot in the same transaction. The
+next maintenance pass releases the process-local capacity claim. Committed quota
+and credits stay charged. Repeating clearance adds no second audit or release.
+The maintenance credential discovers only opaque recovery candidate IDs; it
+cannot read request content, mutate accounting, or clear unknown work. Overall
+`/health/ready` remains 503 and inference remains unavailable.
+
 Local foundation diagnostics use only the runtime secret and need no healthy
 dependency prerequisite:
 
@@ -205,7 +230,7 @@ check failed. Output contains only fixed check names and booleans. These checks
 do not prove the complete schema or replace migration/isolation tests. They never
 read tenant records or mutate Redis. Dependency details have no HTTP route.
 `foundation_ready=true` is distinct from application readiness: output always
-reports `ready=false` while the complete admission, recovery and model readiness
+reports `ready=false` while admission integration and model readiness
 gates remain unfinished. Redis PING/AOF health does not establish limiter
 state or satisfy its restart barrier. `/health/live` remains responsive during
 dependency outages; `/health/ready` remains a minimal 503 without network IO.

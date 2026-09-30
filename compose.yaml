@@ -30,7 +30,7 @@ services:
     configs:
       - source: oidc_ca
         target: /run/config/oidc-ca.pem
-    secrets: [db_runtime_password, audit_cursor_key, api_key_pepper]
+    secrets: [db_runtime_password, db_maintenance_password, audit_cursor_key, api_key_pepper]
     ports: ["127.0.0.1:${ARBITER_API_PORT:-8000}:8000"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -113,7 +113,7 @@ services:
     <<: *app
     profiles: [operations]
     command: [python, -m, arbiter.operations.bootstrap]
-    secrets: [db_bootstrap_password, db_migration_password, db_operator_password, db_runtime_password]
+    secrets: [db_bootstrap_password, db_migration_password, db_operator_password, db_runtime_password, db_maintenance_password]
     depends_on:
       postgres: {condition: service_healthy}
 
@@ -137,6 +137,14 @@ services:
         target: /run/approvals
         read_only: true
         bind: {create_host_path: false}
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  clearance:
+    <<: *app
+    profiles: [operations]
+    command: [python, -m, arbiter.operations.clearance, --help]
+    secrets: [db_operator_password]
     depends_on:
       postgres: {condition: service_healthy}
 
@@ -192,3 +200,5 @@ secrets:
     file: ${ARBITER_SECRETS_DIR:?Set the protected secret directory}/db_operator_password
   db_runtime_password:
     file: ${ARBITER_SECRETS_DIR:?Set the protected secret directory}/db_runtime_password
+  db_maintenance_password:
+    file: ${ARBITER_SECRETS_DIR:?Set the protected secret directory}/db_maintenance_password

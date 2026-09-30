@@ -38,6 +38,8 @@ def secret_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory = tmp_path / "secrets"
     directory.mkdir()
     (directory / "db_runtime_password").write_text("inert-test-password-" + "x" * 32)
+    # The real lifespan also requires the maintenance credential at startup.
+    (directory / "db_maintenance_password").write_text("inert-maintenance-password-" + "x" * 32)
     key_file = directory / "audit_cursor_key"
     key_file.write_bytes(base64.b64encode(bytes(32)))
     monkeypatch.setenv("ARBITER_AUDIT_KEY_FILE", str(key_file))

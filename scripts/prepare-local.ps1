@@ -60,7 +60,7 @@ foreach ($rule in $approvalAcl.Access) {
         throw 'Approval-directory access is not restricted to the expected principals.'
     }
 }
-foreach ($secretName in @('db_bootstrap_password', 'db_migration_password', 'db_operator_password', 'db_runtime_password', 'audit_cursor_key', 'api_key_pepper', 'request_fingerprint_key')) {
+foreach ($secretName in @('db_bootstrap_password', 'db_migration_password', 'db_operator_password', 'db_runtime_password', 'db_maintenance_password', 'audit_cursor_key', 'api_key_pepper', 'request_fingerprint_key')) {
     $secretPath = Join-Path $secretDirectory $secretName
     if (Test-Path -LiteralPath $secretPath) {
         foreach ($fileRule in (Get-Acl -LiteralPath $secretPath).Access) {

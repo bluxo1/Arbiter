@@ -9,7 +9,7 @@ from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
 
-DatabaseRole = Literal["bootstrap", "migration", "operator", "runtime"]
+DatabaseRole = Literal["bootstrap", "migration", "operator", "runtime", "maintenance"]
 
 
 class FingerprintSettings(BaseSettings):

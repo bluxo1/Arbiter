@@ -5,7 +5,7 @@ from psycopg import sql
 
 from arbiter.config import DatabaseRole, DatabaseSettings
 
-ROLES: tuple[DatabaseRole, ...] = ("migration", "operator", "runtime")
+ROLES: tuple[DatabaseRole, ...] = ("migration", "operator", "runtime", "maintenance")
 LOOKUP_ROLE = "arbiter_identity_lookup"
 KEY_ROLE = "arbiter_key_writer"
 KEY_LOOKUP_ROLE = "arbiter_key_lookup"
@@ -13,6 +13,7 @@ RESERVATION_ROLE = "arbiter_reservation_writer"
 RELEASE_ROLE = "arbiter_release_writer"
 DISPATCH_ROLE = "arbiter_dispatch_writer"
 TERMINAL_ROLE = "arbiter_terminal_writer"
+MAINTENANCE_ROLE = "arbiter_maintenance_worker"
 
 
 def bootstrap(settings: DatabaseSettings) -> None:
@@ -52,6 +53,7 @@ def bootstrap(settings: DatabaseSettings) -> None:
                     RELEASE_ROLE,
                     DISPATCH_ROLE,
                     TERMINAL_ROLE,
+                    MAINTENANCE_ROLE,
                 }
                 if role == "migration"
                 else set()
@@ -227,6 +229,29 @@ def bootstrap(settings: DatabaseSettings) -> None:
         connection.execute(
             "GRANT arbiter_terminal_writer TO arbiter_migration WITH INHERIT FALSE, SET TRUE"
         )
+        if (
+            connection.execute(
+                "SELECT 1 FROM pg_roles WHERE rolname=%s", (MAINTENANCE_ROLE,)
+            ).fetchone()
+            is None
+        ):
+            connection.execute("CREATE ROLE arbiter_maintenance_worker")
+        if (
+            connection.execute(
+                "SELECT 1 FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles "
+                "WHERE rolname=%s)",
+                (MAINTENANCE_ROLE,),
+            ).fetchone()
+            is not None
+        ):
+            raise ValueError("unexpected maintenance owner membership")
+        connection.execute(
+            "ALTER ROLE arbiter_maintenance_worker WITH NOLOGIN NOSUPERUSER NOCREATEDB "
+            "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL"
+        )
+        connection.execute(
+            "GRANT arbiter_maintenance_worker TO arbiter_migration WITH INHERIT FALSE, SET TRUE"
+        )
         connection.execute(
             sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(sql.Identifier(settings.name))
         )
@@ -235,7 +260,7 @@ def bootstrap(settings: DatabaseSettings) -> None:
         connection.execute(
             sql.SQL(
                 "GRANT CONNECT ON DATABASE {} TO arbiter_migration, arbiter_operator, "
-                "arbiter_runtime"
+                "arbiter_runtime, arbiter_maintenance"
             ).format(sql.Identifier(settings.name))
         )
         connection.execute(

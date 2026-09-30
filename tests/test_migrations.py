@@ -66,9 +66,10 @@ def disposable_database() -> Iterator[Engine]:
                 )
             )
             admin.execute(
-                sql.SQL("GRANT CONNECT ON DATABASE {} TO arbiter_runtime, arbiter_operator").format(
-                    sql.Identifier(name)
-                )
+                sql.SQL(
+                    "GRANT CONNECT ON DATABASE {} TO "
+                    "arbiter_runtime, arbiter_operator, arbiter_maintenance"
+                ).format(sql.Identifier(name))
             )
             with psycopg.connect(
                 host=settings.host,
@@ -95,6 +96,71 @@ def migrate_to(engine: Engine, revision: str, *, downgrade: bool = False) -> Non
             command.downgrade(config, revision)
         else:
             command.upgrade(config, revision)
+
+
+def test_maintenance_recovery_migration_restricts_discovery_and_round_trips(
+    disposable_database: Engine,
+) -> None:
+    engine = disposable_database
+    migrate_to(engine, "head")
+    with engine.begin() as connection:
+        assert connection.execute(
+            text("SELECT version_num FROM public.alembic_version")
+        ).scalar_one() == ("0017_maintenance_recovery")
+        assert connection.execute(
+            text("""
+                SELECT c.relrowsecurity AND c.relforcerowsecurity
+                FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                WHERE n.nspname='arbiter' AND c.relname='capacity_clearances'
+            """)
+        ).scalar_one()
+        assert (
+            connection.execute(
+                text("""
+                SELECT pg_get_userbyid(proowner) FROM pg_proc
+                WHERE oid='arbiter.maintenance_candidates(text)'::regprocedure
+            """)
+            ).scalar_one()
+            == "arbiter_maintenance_worker"
+        )
+    settings = DatabaseSettings()
+    runtime, maintenance = (
+        create_engine(
+            settings.url(role).set(database=engine.url.database),
+            poolclass=NullPool,
+            hide_parameters=True,
+        )
+        for role in ("runtime", "maintenance")
+    )
+    try:
+        with runtime.connect() as connection:
+            assert not connection.execute(
+                text(
+                    "SELECT has_function_privilege(current_user, "
+                    "'arbiter.maintenance_candidates(text)', 'EXECUTE')"
+                )
+            ).scalar_one()
+            assert not connection.execute(
+                text(
+                    "SELECT has_table_privilege(current_user, "
+                    "'arbiter.capacity_clearances', 'SELECT,INSERT')"
+                )
+            ).scalar_one()
+        with maintenance.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM arbiter.maintenance_candidates('unknown')")
+                ).scalar_one()
+                == 0
+            )
+            assert not connection.execute(
+                text("SELECT has_table_privilege(current_user, 'arbiter.requests', 'SELECT')")
+            ).scalar_one()
+    finally:
+        runtime.dispose()
+        maintenance.dispose()
+    migrate_to(engine, "0016_rate_preflight", downgrade=True)
+    migrate_to(engine, "head")
 
 
 def test_dispatch_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
@@ -150,7 +216,7 @@ def test_dispatch_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0016_rate_preflight"
+                == "0017_maintenance_recovery"
             )
             set_context(connection, actor.tenant)
             assert connection.execute(
@@ -235,7 +301,7 @@ def test_terminal_upgrade_preserves_dispatched_request_and_refuses_evidence_loss
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0016_rate_preflight"
+                == "0017_maintenance_recovery"
             )
     finally:
         runtime.dispose()
@@ -309,7 +375,7 @@ def test_release_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0016_rate_preflight"
+                == "0017_maintenance_recovery"
             )
             set_context(connection, actor.tenant)
             assert connection.execute(
@@ -420,7 +486,7 @@ def test_reservation_upgrade_preserves_legacy_evidence_and_blocks_lossy_downgrad
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0016_rate_preflight"
+                == "0017_maintenance_recovery"
             )
     finally:
         runtime.dispose()
@@ -515,13 +581,13 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
     with engine.begin() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
-            == "0016_rate_preflight"
+            == "0017_maintenance_recovery"
         )
         assert (
             connection.execute(
                 text("SELECT count(*) FROM pg_tables WHERE schemaname='arbiter'")
             ).scalar_one()
-            == 13
+            == 14
         )
         assert (
             connection.execute(
@@ -530,7 +596,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
             WHERE n.nspname='arbiter' AND c.relrowsecurity AND c.relforcerowsecurity
         """)
             ).scalar_one()
-            == 10
+            == 11
         )
         assert (
             connection.execute(

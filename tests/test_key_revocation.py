@@ -597,8 +597,11 @@ async def test_secret_verifier_absence_and_workload_routes_remain_unavailable(
         401,
         "invalid_credentials",
     )
-    for path in ("/v1/chat/completions", "/v1/usage"):
-        assert (await client.post(path, headers=auth(data["api_key"]), json={})).status_code == 404
+    credential = auth(data["api_key"])
+    # Inference remains absent (404); GET-only metadata routes reject POST with 405.
+    response = await client.post("/v1/chat/completions", headers=credential, json={})
+    assert response.status_code == 404
+    assert (await client.post("/v1/usage", headers=credential, json={})).status_code == 405
     assert (
         await client.post("/v1/models", headers=auth(data["api_key"]), json={})
     ).status_code == 405

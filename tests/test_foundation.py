@@ -12,8 +12,10 @@ from arbiter.main import create_app
 def secret_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory = tmp_path / "secrets"
     directory.mkdir()
-    # Inert test credential only; never a deployment credential.
+    # Inert test credentials only; never deployment credentials. The maintenance
+    # credential is required by the real lifespan, not derived from the runtime one.
     (directory / "db_runtime_password").write_text("inert-test-password-" + "x" * 32)
+    (directory / "db_maintenance_password").write_text("inert-maintenance-password-" + "x" * 32)
     key_file = directory / "audit_cursor_key"
     key_file.write_bytes(base64.b64encode(bytes(32)))
     monkeypatch.setenv("ARBITER_AUDIT_KEY_FILE", str(key_file))

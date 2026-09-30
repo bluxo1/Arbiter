@@ -112,6 +112,7 @@ class DispatchService:
             if released is not None:
                 lease._release_after_confirmed(released)
                 raise DispatchRejected(decision)
+            lease._transfer_after_dispatch()
             return DispatchAuthorized(request_id)
         except DBAPIError as error:
             code = getattr(error.orig, "sqlstate", None)
@@ -198,6 +199,10 @@ class DispatchService:
                 # Deadline, malformed output and all inconclusive failures stay charged
                 # and quarantined. The exception object/body is never logged or stored.
                 state, outcome = "unknown", "unknown"
+        if state == "unknown":
+            # Close local recovery admission before the unknown terminal commit.
+            # A concurrent maintenance scan cannot reopen a quarantined gate.
+            lease._quarantine_unknown()
         try:
             with tenant_transaction(self._engine, TenantContext(binding.tenant_id)) as transaction:
                 changed = TerminalRepository(transaction).finalize(

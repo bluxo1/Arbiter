@@ -467,6 +467,7 @@ def test_policy_and_grant_catalog_matches_security_contract(store: Store) -> Non
             ("api_keys", True, True, "arbiter_migration"),
             ("audit_events", True, True, "arbiter_migration"),
             ("budget_windows", True, True, "arbiter_migration"),
+            ("capacity_clearances", True, True, "arbiter_migration"),
             ("memberships", True, True, "arbiter_migration"),
             ("model_registry_journal", False, False, "arbiter_migration"),
             ("principals", False, False, "arbiter_migration"),
@@ -484,7 +485,7 @@ def test_policy_and_grant_catalog_matches_security_contract(store: Store) -> Non
             WHERE table_schema='arbiter' AND column_name='tenant_id' AND is_nullable='NO'
         """)
             ).scalar_one()
-            == 10
+            == 11
         )
         assert (
             connection.execute(
@@ -495,6 +496,27 @@ def test_policy_and_grant_catalog_matches_security_contract(store: Store) -> Non
         """)
             ).scalar_one()
             == 10
+        )
+        assert (
+            connection.execute(
+                text("""
+            SELECT count(*) FROM pg_policies WHERE schemaname='arbiter'
+                AND policyname='maintenance_clearance_access'
+                AND tablename='capacity_clearances'
+        """)
+            ).scalar_one()
+            == 1
+        )
+        assert (
+            connection.execute(
+                text("""
+            SELECT count(*) FROM pg_class c, LATERAL aclexplode(c.relacl) a
+            WHERE c.relnamespace='arbiter'::regnamespace
+                AND c.relname='capacity_clearances'
+                AND a.grantee=(SELECT oid FROM pg_roles WHERE rolname='arbiter_runtime')
+        """)
+            ).scalar_one()
+            == 0
         )
         assert (
             connection.execute(
