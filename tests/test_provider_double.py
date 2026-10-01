@@ -6,7 +6,7 @@ import pytest
 
 from arbiter.governance.fingerprint import Message
 from arbiter.providers.double import DeterministicProvider
-from arbiter.providers.port import ProviderRequest
+from arbiter.providers.port import ProviderModelUnavailable, ProviderRejectedInput, ProviderRequest
 
 
 def test_capabilities_and_validation_never_generate() -> None:
@@ -17,9 +17,9 @@ def test_capabilities_and_validation_never_generate() -> None:
     assert provider.capabilities().healthy
     provider.validate(request)
     assert provider.calls == ()
-    with pytest.raises(ValueError, match="model unavailable"):
+    with pytest.raises(ProviderModelUnavailable):
         provider.validate(ProviderRequest(uuid4(), digest, request_id, request.messages, 128))
-    with pytest.raises(ValueError, match="model unavailable"):
+    with pytest.raises(ProviderRejectedInput):
         provider.validate(ProviderRequest(model, digest, request_id, request.messages, 257))
     assert provider.calls == ()
     assert "private fixture" not in repr(request)

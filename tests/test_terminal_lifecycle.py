@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.pool import NullPool
+from test_provider_contract import Scenario, ScriptedProvider
 from test_reservation_release import fault
 from test_reservation_transactions import Actor, ReservationStore
 from test_reservation_transactions import store as store
@@ -114,6 +115,60 @@ def test_success_one_call_after_committed_marker_and_content_free(
     with pytest.raises((CapacityOwnershipError, DispatchConflict)):
         DispatchService(store.runtime).run_double_once(lease, original, provider, store.fingerprint)
     assert provider.calls == (lease.result.request_id,)
+
+
+@pytest.mark.parametrize(
+    "scenario,state,occupied",
+    [
+        ("success", "succeeded", 0),
+        ("unavailable", "unknown", 1),
+        ("deadline", "unknown", 1),
+        ("malformed", "unknown", 1),
+        ("oversized", "unknown", 1),
+        ("unknown_model", "failed", 0),
+        ("ambiguous", "unknown", 1),
+    ],
+)
+def test_independent_provider_uses_existing_dispatch_ownership(
+    store: ReservationStore, scenario: Scenario, state: str, occupied: int
+) -> None:
+    actor, gate, lease, original = prepared(store)
+    provider = ScriptedProvider(store.model, DIGEST, 256, scenario)
+    completed = DispatchService(store.runtime).run_double_once(
+        lease, original, provider, store.fingerprint
+    )
+    assert completed.state == state
+    assert provider.calls == (lease.result.request_id,)
+    assert row(store, actor, lease.result.request_id)[0] == state
+    assert store.totals(actor) == (1, 0, 10, 0)
+    assert gate.occupied == occupied
+    with pytest.raises((CapacityOwnershipError, DispatchConflict)):
+        DispatchService(store.runtime).run_double_once(lease, original, provider, store.fingerprint)
+    assert provider.calls == (lease.result.request_id,)
+
+
+@pytest.mark.parametrize("body", ["oversized", "malformed"])
+def test_dispatch_rejects_invalid_returned_provider_result(
+    store: ReservationStore, body: str
+) -> None:
+    actor, gate, lease, original = prepared(store)
+
+    class InvalidResultProvider(ScriptedProvider):
+        def generate(self, request: ProviderRequest, deadline: datetime) -> ProviderResult:
+            super().generate(request, deadline)
+            if body == "oversized":
+                return ProviderResult("x" * 1048577)
+            return ProviderResult("fixture response", finish_reason="invalid")
+
+    provider = InvalidResultProvider(store.model, DIGEST, 256, "success")
+    completed = DispatchService(store.runtime).run_double_once(
+        lease, original, provider, store.fingerprint
+    )
+    assert completed.state == "unknown"
+    assert provider.calls == (lease.result.request_id,)
+    assert row(store, actor, lease.result.request_id)[0] == "unknown"
+    assert store.totals(actor) == (1, 0, 10, 0)
+    assert gate.occupied == 1
 
 
 @pytest.mark.parametrize(

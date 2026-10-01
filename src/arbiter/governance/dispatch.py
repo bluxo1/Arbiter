@@ -15,8 +15,16 @@ from arbiter.persistence.dispatch import DispatchRepository
 from arbiter.persistence.release import ReleaseRepository, ReleaseResult
 from arbiter.persistence.tenant import tenant_transaction
 from arbiter.persistence.terminal import TerminalRepository
-from arbiter.providers.double import DeterministicProvider
-from arbiter.providers.port import ProviderDefiniteFailure, ProviderRequest, ProviderResult
+from arbiter.providers.port import (
+    ProviderDefiniteFailure,
+    ProviderMalformed,
+    ProviderOversizedResponse,
+    ProviderPort,
+    ProviderRejectedInput,
+    ProviderRequest,
+    ProviderResult,
+    ProviderUnavailable,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,18 +73,21 @@ class ProviderCompletion:
 
 def _valid_result(value: object, output_cap: int) -> ProviderResult:
     if not isinstance(value, ProviderResult):
-        raise ValueError("malformed provider result")
-    if (
-        type(value.assistant_text) is not str
-        or len(value.assistant_text.encode("utf-8")) > 1048576
-        or value.finish_reason not in {"stop", "length"}
-    ):
-        raise ValueError("malformed provider result")
+        raise ProviderMalformed()
+    if type(value.assistant_text) is not str:
+        raise ProviderMalformed()
+    try:
+        if len(value.assistant_text.encode("utf-8")) > 1048576:
+            raise ProviderOversizedResponse()
+    except UnicodeError:
+        raise ProviderMalformed() from None
+    if type(value.finish_reason) is not str or value.finish_reason not in {"stop", "length"}:
+        raise ProviderMalformed()
     for count in (value.input_tokens, value.output_tokens):
         if count is not None and (type(count) is not int or not 0 <= count <= 9223372036854775807):
-            raise ValueError("malformed provider telemetry")
+            raise ProviderMalformed()
     if value.output_tokens is not None and value.output_tokens > output_cap:
-        raise ValueError("malformed provider telemetry")
+        raise ProviderMalformed()
     return value
 
 
@@ -128,10 +139,10 @@ class DispatchService:
         self,
         lease: CapacityLease,
         original: ReservationInput,
-        provider: DeterministicProvider,
+        provider: ProviderPort,
         fingerprinter: Fingerprinter,
     ) -> ProviderCompletion:
-        """Call only the test double after an already-committed dispatch marker.
+        """Call one provider port after an already-committed dispatch marker.
 
         The original bounded content remains transient. A process-local one-shot claim
         and the durable dispatched-state check prevent duplicate calls in this process;
@@ -141,7 +152,7 @@ class DispatchService:
             not isinstance(lease, CapacityLease)
             or not lease.owns()
             or not isinstance(original, ReservationInput)
-            or not isinstance(provider, DeterministicProvider)
+            or not isinstance(provider, ProviderPort)
             or not isinstance(fingerprinter, Fingerprinter)
         ):
             raise CapacityOwnershipError()
@@ -169,21 +180,30 @@ class DispatchService:
             original.messages,
             original.max_output_tokens,
         )
+        validation_outcome = "succeeded"
         try:
             # Validation is explicitly non-inferencing. A known local mismatch
             # cannot have reached generation and is a definite failed attempt.
             provider.validate(transient)
-            validated = True
+        except (ProviderRejectedInput, ProviderDefiniteFailure):
+            validation_outcome = "failed"
+        except ProviderUnavailable:
+            # Validation cannot initiate work, but it cannot establish readiness.
+            validation_outcome = "failed"
         except Exception:
-            validated = False
+            # An undocumented adapter failure after the dispatch marker is
+            # conservatively quarantined; it cannot cause a provider call.
+            validation_outcome = "unknown"
         if not lease._claim_provider_once():
             raise DispatchConflict()
         deadline = datetime.now(UTC) + timedelta(seconds=120)
         text_value: str | None = None
         input_tokens: int | None = None
         output_tokens: int | None = None
-        if not validated:
+        if validation_outcome == "failed":
             state, outcome = "failed", "provider_failure"
+        elif validation_outcome == "unknown":
+            state, outcome = "unknown", "unknown"
         else:
             try:
                 # There is no open PostgreSQL transaction during this call.
