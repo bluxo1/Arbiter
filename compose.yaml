@@ -19,7 +19,7 @@ x-app: &app
 services:
   api:
     <<: *app
-    networks: [edge, control, identity]
+    networks: [edge, control, identity, provider]
     environment:
       ARBITER_DB_HOST: postgres
       ARBITER_OIDC_ISSUER: ${ARBITER_OIDC_ISSUER:-https://localhost:18443/realms/arbiter}

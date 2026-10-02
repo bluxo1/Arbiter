@@ -107,6 +107,14 @@ class RedisSettings(BaseSettings):
     port: int = Field(default=6379, ge=1, le=65535)
 
 
+class OllamaSettings(BaseSettings):
+    """Only the private Compose Ollama service is an allowed destination."""
+
+    model_config = SettingsConfigDict(env_prefix="ARBITER_OLLAMA_", frozen=True)
+
+    base_url: Literal["http://ollama:11434"] = "http://ollama:11434"
+
+
 class DatabaseSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ARBITER_DB_", frozen=True)
 
