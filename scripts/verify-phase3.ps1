@@ -1,5 +1,6 @@
 param(
     [ValidateSet('matrix', 'boundary', 'p33', 'related', 'migrations', 'full', 'restart', 'checks')][string]$Phase = 'matrix',
+    [ValidateSet('', 'tests/test_usage_transport.py::test_management_current_and_historical_usage')][string]$Deselect = '',
     [string]$DataRoot = 'D:\AI & ML\ArbiterData\phase3\exit-matrix-20260930\ArbiterData'
 )
 
@@ -15,6 +16,10 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $name = "arbiter-p34-$Phase-$stamp"
 $evidence = Join-Path $resolvedData "tmp\$name"
 $control = Join-Path $evidence 'control'
+$timingLog = Join-Path $evidence 'fault-timing.jsonl'
+$postgresHealthSeconds = 60
+$otherHealthSeconds = 40
+$healthPollMilliseconds = 500
 New-Item -ItemType Directory -Path $control -Force | Out-Null
 $arguments = @('run', '-d', '--name', $name, '--network', 'arbiter-p34_control',
     '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
@@ -44,12 +49,12 @@ if ($Phase -eq 'restart') {
     # Run the original host-gated test only AFTER a real process restart.
     & docker restart --timeout 2 arbiter-p34-redis-1
     if ($LASTEXITCODE -ne 0) { throw 'Separate Redis restart failed.' }
-    $restartDeadline = (Get-Date).AddSeconds(40)
+    $restartDeadline = (Get-Date).AddSeconds($otherHealthSeconds)
     do {
         $restartHealth = & docker inspect --format '{{.State.Health.Status}}' arbiter-p34-redis-1
         if ($LASTEXITCODE -ne 0) { throw 'Restart health probe failed.' }
         if ($restartHealth -eq 'healthy') { break }
-        Start-Sleep -Milliseconds 500
+        Start-Sleep -Milliseconds $healthPollMilliseconds
     } while ((Get-Date) -lt $restartDeadline)
     if ($restartHealth -ne 'healthy') { throw 'Restarted Redis did not become healthy.' }
     $arguments += @('-e', 'ARBITER_TEST_EXIT_HOST=0', '-e', 'ARBITER_TEST_REDIS_RESTARTED=1')
@@ -60,6 +65,7 @@ if ($Phase -eq 'checks') {
 } else {
     $arguments += @('python', '-m', 'pytest', '-q', '-x', '-p', 'no:cacheprovider',
         "--junitxml=/evidence/$Phase.xml")
+    if ($Deselect -ne '') { $arguments += "--deselect=$Deselect" }
     if ($Phase -eq 'matrix') {
         $arguments += @('tests/test_phase3_exit_matrix.py', 'tests/test_phase3_exit_races.py',
             'tests/test_phase3_exit_crashes.py', 'tests/test_phase3_exit_faults.py',
@@ -87,10 +93,14 @@ if ($Phase -eq 'checks') {
 & docker @arguments
 if ($LASTEXITCODE -ne 0) { throw 'Verification container did not start.' }
 $handled = @{}
+$faultFailed = $false
 try {
     while ($true) {
         foreach ($file in @(Get-ChildItem -LiteralPath $control -Filter '*.request.json' -File)) {
             if ($handled.ContainsKey($file.Name)) { continue }
+            if ($faultFailed) { throw 'Fault controller received another request after a failed operation.' }
+            $observedUtc = [DateTime]::UtcNow
+            $requestUtc = $file.LastWriteTimeUtc
             $request = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
             $operation = [string]$request.operation
             if ($operation -notin @('redis_stop', 'redis_start', 'redis_restart', 'postgres_stop', 'postgres_start')) {
@@ -98,28 +108,95 @@ try {
             }
             $service = if ($operation.StartsWith('redis_')) { 'redis' } else { 'postgres' }
             $target = "arbiter-p34-$service-1"
+            $actionInvokedUtc = [DateTime]::UtcNow
             if ($operation.EndsWith('_stop')) {
+                # Short grace deliberately exercises abrupt outages and possible WAL recovery.
                 & docker stop --timeout 2 $target
             } elseif ($operation.EndsWith('_restart')) {
                 & docker restart --timeout 2 $target
             } else {
                 & docker start $target
             }
+            $actionCompletedUtc = [DateTime]::UtcNow
             if ($LASTEXITCODE -ne 0) { throw 'Disposable-stack fault operation failed.' }
+            $healthWaitStartedUtc = $null
+            $healthyUtc = $null
+            $timeoutUtc = $null
+            $dockerStatus = $null
+            $healthStatus = $null
+            $lastProbeExit = $null
             if (-not $operation.EndsWith('_stop')) {
-                $deadline = (Get-Date).AddSeconds(40)
+                $healthWaitStartedUtc = [DateTime]::UtcNow
+                $healthSeconds = if ($operation -eq 'postgres_start') {
+                    $postgresHealthSeconds
+                } else {
+                    $otherHealthSeconds
+                }
+                $deadline = $healthWaitStartedUtc.AddSeconds($healthSeconds)
                 do {
                     $health = & docker inspect --format '{{.State.Health.Status}}' $target
                     if ($LASTEXITCODE -ne 0) { throw 'Health probe failed.' }
-                    if ($health -eq 'healthy') { break }
-                    Start-Sleep -Milliseconds 500
-                } while ((Get-Date) -lt $deadline)
-                if ($health -ne 'healthy') { throw 'Disposable service did not become healthy.' }
+                    if ($health -eq 'healthy') {
+                        $healthyUtc = [DateTime]::UtcNow
+                        $healthStatus = 'healthy'
+                        break
+                    }
+                    if ([DateTime]::UtcNow -ge $deadline) { break }
+                    Start-Sleep -Milliseconds $healthPollMilliseconds
+                } while ($true)
+                if ($null -eq $healthyUtc) {
+                    $timeoutUtc = [DateTime]::UtcNow
+                    $healthStatus = [string]$health
+                    $stateJson = & docker inspect --format '{{json .State}}' $target
+                    if ($LASTEXITCODE -eq 0) {
+                        $state = $stateJson | ConvertFrom-Json
+                        $dockerStatus = [string]$state.Status
+                        $healthStatus = [string]$state.Health.Status
+                        if ($null -ne $state.Health.Log -and $state.Health.Log.Count -gt 0) {
+                            $lastProbeExit = [int]$state.Health.Log[-1].ExitCode
+                        }
+                    }
+                    $faultFailed = $true
+                }
             }
             $reply = Join-Path $control ($file.Name.Replace('.request.json', '.reply.json'))
             $temporary = "$reply.tmp"
-            [System.IO.File]::WriteAllText($temporary, '{"complete":true}')
+            $response = if ($faultFailed) {
+                [ordered]@{
+                    complete = $false
+                    error = 'health_timeout'
+                    docker_status = $dockerStatus
+                    health_status = $healthStatus
+                    last_probe_exit = $lastProbeExit
+                }
+            } else {
+                [ordered]@{ complete = $true }
+            }
+            [System.IO.File]::WriteAllText($temporary, ($response | ConvertTo-Json -Compress))
             Move-Item -LiteralPath $temporary -Destination $reply
+            $replyUtc = [DateTime]::UtcNow
+            $healthFinishedUtc = if ($null -ne $healthyUtc) { $healthyUtc } else { $timeoutUtc }
+            $timing = [ordered]@{
+                operation = $operation
+                request_utc = $requestUtc.ToString('o')
+                observed_utc = $observedUtc.ToString('o')
+                docker_action_invoked_utc = $actionInvokedUtc.ToString('o')
+                docker_action_completed_utc = $actionCompletedUtc.ToString('o')
+                docker_action_seconds = [Math]::Round(($actionCompletedUtc - $actionInvokedUtc).TotalSeconds, 3)
+                docker_start_invoked_utc = if ($operation -eq 'postgres_start') { $actionInvokedUtc.ToString('o') } else { $null }
+                docker_start_completed_utc = if ($operation -eq 'postgres_start') { $actionCompletedUtc.ToString('o') } else { $null }
+                health_wait_started_utc = if ($null -ne $healthWaitStartedUtc) { $healthWaitStartedUtc.ToString('o') } else { $null }
+                healthy_utc = if ($null -ne $healthyUtc) { $healthyUtc.ToString('o') } else { $null }
+                timeout_utc = if ($null -ne $timeoutUtc) { $timeoutUtc.ToString('o') } else { $null }
+                docker_start_seconds = if ($operation -eq 'postgres_start') { [Math]::Round(($actionCompletedUtc - $actionInvokedUtc).TotalSeconds, 3) } else { $null }
+                health_wait_seconds = if ($null -ne $healthFinishedUtc) { [Math]::Round(($healthFinishedUtc - $healthWaitStartedUtc).TotalSeconds, 3) } else { $null }
+                request_seconds = [Math]::Round(($replyUtc - $requestUtc).TotalSeconds, 3)
+                outcome = if ($faultFailed) { 'health_timeout' } else { 'complete' }
+                docker_status = $dockerStatus
+                health_status = $healthStatus
+                last_probe_exit = $lastProbeExit
+            }
+            [System.IO.File]::AppendAllText($timingLog, (($timing | ConvertTo-Json -Compress) + [Environment]::NewLine))
             $handled[$file.Name] = $true
         }
         $running = & docker inspect --format '{{.State.Running}}' $name
