@@ -264,7 +264,8 @@ def test_operator_cli_requires_provider_stopped_attestation(
 
 
 @pytest.mark.skipif(os.environ.get("ARBITER_TEST_DATABASE") != "1", reason="real PostgreSQL")
-@pytest.mark.parametrize("age,eligible", [(29, False), (30, True), (31, True)])
+# Leave room for fixture writes and candidate discovery before the 30-second cutoff.
+@pytest.mark.parametrize("age,eligible", [(10, False), (30, True), (31, True)])
 def test_stale_reservation_threshold_and_durable_release(
     store: ReservationStore,
     discovery_engine: Engine,
