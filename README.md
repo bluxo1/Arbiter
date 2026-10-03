@@ -39,7 +39,8 @@ cursors with default page size 50 and maximum 100. Workload catalog access requi
 key, with no additional scope beyond the approved key scopes. An empty registry or current
 policy yields an empty catalog; catalog access never invokes or downloads a model.
 
-Local registry provisioning uses `operator register-model` and `operator update-model`.
+Local registry provisioning uses `operator register-model`, `operator update-model`,
+and `operator bind-native-model`.
 These commands append immutable global journal evidence in the same transaction; updates
 require `--expected-revision`. Runtime and tenant HTTP identities cannot mutate this registry
 or access its journal. Tenant audit records remain separate.
@@ -66,7 +67,16 @@ docker compose --profile operations run --rm operator update-model `
   --alias '<same public alias>' --adapter ollama --digest '<approved sha256 digest>' `
   --context-cap 4096 --output-cap 1024 --credit-charge 10 --state active `
   --expected-revision 1 --approval /run/approvals/verified-model.json
+
+docker compose --profile operations run --rm operator bind-native-model `
+  --model-id '<UUID returned by register-model>' --expected-revision 2 `
+  --provider-kind ollama --native-name '<operator-approved local tag>' `
+  --approval /run/approvals/verified-model.json
 ```
+
+Binding a native tag advances the registered model revision atomically. A later model
+update advances it again; bind the verified native tag for that new revision before
+using it for Ollama execution. The public alias is never used as the native tag.
 
 Replace placeholders only with reviewed operator inputs; these examples register nothing.
 Context/output caps may not exceed the attested limits; output is at most 1,024 and no greater

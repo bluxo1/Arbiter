@@ -432,11 +432,27 @@ def test_disconnect_after_body_accepted_is_ambiguous(setup: Any) -> None:
 
 
 @pytest.mark.parametrize(
-    "name", ["https://evil.invalid", "remote/model:1", "model:cloud", "model@evil:1"]
+    "name",
+    [
+        "https://evil.invalid",
+        "remote/model:1",
+        "model:cloud",
+        "gpt-oss:120b-cloud",
+        "fixture:tag-cloud",
+        "fixture:CLOUD",
+        "gpt-oss:120b-Cloud",
+        "fixture:TAG-CLOUD",
+        "model@evil:1",
+    ],
 )
 def test_binding_rejects_remote_or_untrusted_model_name(name: str) -> None:
     with pytest.raises(ValueError):
         OllamaModelBinding(uuid4(), DIGEST, name, 4096, 256)
+
+
+@pytest.mark.parametrize("name", ["fixture:one", "llama3.2:latest", "qwen3:4b"])
+def test_binding_accepts_local_model_name(name: str) -> None:
+    assert OllamaModelBinding(uuid4(), DIGEST, name, 4096, 256).native_name == name
 
 
 def test_endpoint_setting_rejects_override(monkeypatch: pytest.MonkeyPatch) -> None:

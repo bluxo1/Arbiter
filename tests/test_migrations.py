@@ -106,7 +106,7 @@ def test_maintenance_recovery_migration_restricts_discovery_and_round_trips(
     with engine.begin() as connection:
         assert connection.execute(
             text("SELECT version_num FROM public.alembic_version")
-        ).scalar_one() == ("0017_maintenance_recovery")
+        ).scalar_one() == ("0018_provider_binding")
         assert connection.execute(
             text("""
                 SELECT c.relrowsecurity AND c.relforcerowsecurity
@@ -216,7 +216,7 @@ def test_dispatch_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0017_maintenance_recovery"
+                == "0018_provider_binding"
             )
             set_context(connection, actor.tenant)
             assert connection.execute(
@@ -301,7 +301,7 @@ def test_terminal_upgrade_preserves_dispatched_request_and_refuses_evidence_loss
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0017_maintenance_recovery"
+                == "0018_provider_binding"
             )
     finally:
         runtime.dispose()
@@ -375,7 +375,7 @@ def test_release_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0017_maintenance_recovery"
+                == "0018_provider_binding"
             )
             set_context(connection, actor.tenant)
             assert connection.execute(
@@ -486,7 +486,7 @@ def test_reservation_upgrade_preserves_legacy_evidence_and_blocks_lossy_downgrad
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0017_maintenance_recovery"
+                == "0018_provider_binding"
             )
     finally:
         runtime.dispose()
@@ -581,13 +581,13 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
     with engine.begin() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
-            == "0017_maintenance_recovery"
+            == "0018_provider_binding"
         )
         assert (
             connection.execute(
                 text("SELECT count(*) FROM pg_tables WHERE schemaname='arbiter'")
             ).scalar_one()
-            == 14
+            == 16
         )
         assert (
             connection.execute(
@@ -596,7 +596,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
             WHERE n.nspname='arbiter' AND c.relrowsecurity AND c.relforcerowsecurity
         """)
             ).scalar_one()
-            == 11
+            == 12
         )
         assert (
             connection.execute(

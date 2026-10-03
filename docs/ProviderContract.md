@@ -60,7 +60,15 @@ it checks local model existence before scheduling work. All other uncertain
 post-request failures retain the existing unknown-capable taxonomy. Usage
 counts remain optional telemetry and do not change dispatch accounting.
 
-The model binding is deliberately internal. Later alias-registry work must
-construct it only from operator-verified approval state and must not expose
-native tags, destinations, or options in request data. No real-model generation
-is claimed by the fake-transport contract suite.
+The model binding is deliberately internal. The operator-only provider-binding
+foundation records a finite provider kind and native tag against the registered
+model UUID and a new model revision. Its immutable journal entry binds the exact
+tag to that revision. Dispatch authorization selects the binding while holding
+the model revision lock and stores a tenant-scoped reference to that immutable
+binding in the same transaction as the dispatch marker. A later binding update
+cannot retarget dispatched work; an earlier update invalidates the old reserved
+revision. Runtime can read the selected tag only through a scoped dispatched-
+request capability, using the pinned UUID/digest/revision. Missing or mismatched
+bindings fail closed. No caller field, alias conversion, or live Ollama discovery
+chooses a native tag. Public chat composition and real-model generation remain
+future Phase 4 work.

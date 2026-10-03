@@ -51,8 +51,11 @@ class OllamaModelBinding:
             or type(self.digest) is not str
             or re.fullmatch(r"sha256:[0-9a-f]{64}", self.digest) is None
             or type(self.native_name) is not str
-            or re.fullmatch(r"[A-Za-z0-9_-]{1,64}:[A-Za-z0-9_.-]{1,80}", self.native_name) is None
-            or self.native_name.lower().endswith(":cloud")
+            or re.fullmatch(
+                r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,63}:[A-Za-z0-9_.-]{1,80}", self.native_name
+            )
+            is None
+            or self.native_name.lower().endswith((":cloud", "-cloud"))
             or type(self.context_cap) is not int
             or not 1 <= self.context_cap <= 32768
             or type(self.output_cap) is not int

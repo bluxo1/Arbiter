@@ -74,3 +74,39 @@ class RegistryRepository:
             },
         ).one()
         return RegistryRecord(row.model_id, row.revision, row.journal_id)
+
+    def bind_native_model(
+        self,
+        *,
+        model_id: UUID,
+        expected: int,
+        provider_kind: str,
+        native_name: str,
+        digest: str,
+        context: int,
+        output: int,
+        approval: str,
+        journal_id: UUID,
+        correlation: UUID,
+    ) -> RegistryRecord:
+        require_operator(self._connection)
+        row = self._connection.execute(
+            text("""
+            SELECT model_id,revision,journal_id FROM arbiter.bind_provider_model(
+                :model,:expected,:kind,:native,:digest,:context,:output,:approval,
+                :journal,:correlation)
+        """),
+            {
+                "model": model_id,
+                "expected": expected,
+                "kind": provider_kind,
+                "native": native_name,
+                "digest": digest,
+                "context": context,
+                "output": output,
+                "approval": approval,
+                "journal": journal_id,
+                "correlation": correlation,
+            },
+        ).one()
+        return RegistryRecord(row.model_id, row.revision, row.journal_id)

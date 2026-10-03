@@ -112,6 +112,31 @@ class RegistryConflict(ValueError):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class NativeBindingInput:
+    """Local operator selection by registered UUID, never by a public alias."""
+
+    model_id: UUID
+    expected_revision: int
+    provider_kind: str
+    native_name: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.model_id, UUID)
+            or type(self.expected_revision) is not int
+            or not 1 <= self.expected_revision < MAX_INTEGER
+            or self.provider_kind != "ollama"
+            or type(self.native_name) is not str
+            or re.fullmatch(
+                r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,63}:[A-Za-z0-9_.-]{1,80}", self.native_name
+            )
+            is None
+            or self.native_name.lower().endswith((":cloud", "-cloud"))
+        ):
+            raise ValueError("invalid native model binding")
+
+
 class RegistryService:
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
@@ -145,6 +170,30 @@ class RegistryService:
                     approval=approval.digest(),
                     expected=expected_revision,
                     object_id=uuid4(),
+                    journal_id=uuid4(),
+                    correlation=correlation,
+                )
+        except IntegrityError:
+            raise RegistryConflict("registry conflict") from None
+        return RegistryResult(result.model_id, result.revision, result.journal_id, correlation)
+
+    def bind_native_model(
+        self, binding: NativeBindingInput, approval: ModelApproval
+    ) -> RegistryResult:
+        if not isinstance(binding, NativeBindingInput) or not isinstance(approval, ModelApproval):
+            raise TypeError("validated binding and approval required")
+        correlation = uuid4()
+        try:
+            with registry_transaction(self._engine) as connection:
+                result = RegistryRepository(connection).bind_native_model(
+                    model_id=binding.model_id,
+                    expected=binding.expected_revision,
+                    provider_kind=binding.provider_kind,
+                    native_name=binding.native_name,
+                    digest=approval.model_digest,
+                    context=approval.context_cap,
+                    output=approval.output_cap,
+                    approval=approval.digest(),
                     journal_id=uuid4(),
                     correlation=correlation,
                 )

@@ -15,7 +15,12 @@ from sqlalchemy.exc import IntegrityError
 
 from arbiter.config import DatabaseSettings
 from arbiter.operations.policy import PolicyInput, PolicyService
-from arbiter.operations.registry import ModelInput, RegistryService, read_approval
+from arbiter.operations.registry import (
+    ModelInput,
+    NativeBindingInput,
+    RegistryService,
+    read_approval,
+)
 from arbiter.persistence.operator import OperatorRepository, operator_engine, operator_transaction
 
 TenantStatus = Literal["active", "suspended"]
@@ -179,6 +184,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         model_parser.add_argument("--approval", type=Path, required=True)
         if name == "update-model":
             model_parser.add_argument("--expected-revision", type=int, required=True)
+    binding_parser = commands.add_parser("bind-native-model")
+    binding_parser.add_argument("--model-id", type=UUID, required=True)
+    binding_parser.add_argument("--expected-revision", type=int, required=True)
+    binding_parser.add_argument("--provider-kind", choices=("ollama",), required=True)
+    binding_parser.add_argument("--native-name", required=True)
+    binding_parser.add_argument("--approval", type=Path, required=True)
     engine: Engine | None = None
     try:
         args = parser.parse_args(argv)
@@ -201,7 +212,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         engine = operator_engine(DatabaseSettings())
         service = ProvisioningService(engine)
-        if args.command in ("register-model", "update-model"):
+        if args.command == "bind-native-model":
+            registry_result = RegistryService(engine).bind_native_model(
+                NativeBindingInput(
+                    args.model_id, args.expected_revision, args.provider_kind, args.native_name
+                ),
+                read_approval(args.approval),
+            )
+            print(json.dumps(asdict(registry_result), default=str))
+            return
+        elif args.command in ("register-model", "update-model"):
             model = ModelInput(
                 args.alias,
                 args.adapter,
