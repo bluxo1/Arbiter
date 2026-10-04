@@ -124,7 +124,7 @@ async def test_member_admin_content_free_metadata(
         assert members.subject_a not in response.text and members.subject_b not in response.text
         assert response.headers["cache-control"] == "no-store"
     assert (await client.get("/health/ready")).status_code == 503
-    assert (await client.post("/v1/chat/completions", json={})).status_code == 404
+    assert (await client.post("/v1/chat/completions", json={})).status_code == 401
 
 
 async def test_tenant_headers_do_not_replace_membership_selector(

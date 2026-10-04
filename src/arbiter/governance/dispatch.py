@@ -16,8 +16,10 @@ from arbiter.persistence.release import ReleaseRepository, ReleaseResult
 from arbiter.persistence.tenant import tenant_transaction
 from arbiter.persistence.terminal import TerminalRepository
 from arbiter.providers.port import (
+    ProviderDeadline,
     ProviderDefiniteFailure,
     ProviderMalformed,
+    ProviderModelUnavailable,
     ProviderOversizedResponse,
     ProviderPort,
     ProviderRejectedInput,
@@ -69,6 +71,9 @@ class ProviderCompletion:
     assistant_text: str | None = field(default=None, repr=False)
     input_tokens: int | None = None
     output_tokens: int | None = None
+    public_error: str | None = None
+    model_alias: str | None = None
+    charged_credits: int | None = None
 
 
 def _valid_result(value: object, output_cap: int) -> ProviderResult:
@@ -141,6 +146,8 @@ class DispatchService:
         original: ReservationInput,
         provider: ProviderPort,
         fingerprinter: Fingerprinter,
+        *,
+        deadline: datetime | None = None,
     ) -> ProviderCompletion:
         """Call one provider port after an already-committed dispatch marker.
 
@@ -180,23 +187,38 @@ class DispatchService:
             original.messages,
             original.max_output_tokens,
         )
+        # Governed execution passes its server-owned deadline from admission.
+        # The default preserves direct internal Phase 3 test callers.
+        if deadline is None:
+            deadline = datetime.now(UTC) + timedelta(seconds=120)
         validation_outcome = "succeeded"
+        public_error: str | None = None
         try:
+            if deadline <= datetime.now(UTC):
+                raise ProviderDeadline()
             # Validation is explicitly non-inferencing. A known local mismatch
             # cannot have reached generation and is a definite failed attempt.
             provider.validate(transient)
+        except ProviderDeadline:
+            validation_outcome = "unknown"
+            public_error = "provider_deadline"
+        except ProviderModelUnavailable:
+            validation_outcome = "failed"
+            public_error = "model_unavailable"
         except (ProviderRejectedInput, ProviderDefiniteFailure):
             validation_outcome = "failed"
+            public_error = "provider_failure"
         except ProviderUnavailable:
             # Validation cannot initiate work, but it cannot establish readiness.
             validation_outcome = "failed"
+            public_error = "provider_unavailable"
         except Exception:
             # An undocumented adapter failure after the dispatch marker is
             # conservatively quarantined; it cannot cause a provider call.
             validation_outcome = "unknown"
+            public_error = "provider_outcome_unknown"
         if not lease._claim_provider_once():
             raise DispatchConflict()
-        deadline = datetime.now(UTC) + timedelta(seconds=120)
         text_value: str | None = None
         input_tokens: int | None = None
         output_tokens: int | None = None
@@ -204,6 +226,9 @@ class DispatchService:
             state, outcome = "failed", "provider_failure"
         elif validation_outcome == "unknown":
             state, outcome = "unknown", "unknown"
+        elif deadline <= datetime.now(UTC):
+            state, outcome = "unknown", "unknown"
+            public_error = "provider_deadline"
         else:
             try:
                 # There is no open PostgreSQL transaction during this call.
@@ -213,12 +238,29 @@ class DispatchService:
                 state, outcome = "succeeded", "succeeded"
                 text_value = response.assistant_text
                 input_tokens, output_tokens = response.input_tokens, response.output_tokens
+            except ProviderModelUnavailable:
+                state, outcome = "failed", "provider_failure"
+                public_error = "model_unavailable"
             except ProviderDefiniteFailure:
                 state, outcome = "failed", "provider_failure"
+                public_error = "provider_failure"
+            except ProviderDeadline:
+                state, outcome = "unknown", "unknown"
+                public_error = "provider_deadline"
+            except ProviderOversizedResponse:
+                state, outcome = "unknown", "unknown"
+                public_error = "provider_oversized"
+            except ProviderMalformed:
+                state, outcome = "unknown", "unknown"
+                public_error = "provider_malformed"
+            except ProviderUnavailable:
+                state, outcome = "unknown", "unknown"
+                public_error = "provider_unavailable"
             except Exception:
                 # Deadline, malformed output and all inconclusive failures stay charged
                 # and quarantined. The exception object/body is never logged or stored.
                 state, outcome = "unknown", "unknown"
+                public_error = "provider_outcome_unknown"
         if state == "unknown":
             # Close local recovery admission before the unknown terminal commit.
             # A concurrent maintenance scan cannot reopen a quarantined gate.
@@ -236,7 +278,7 @@ class DispatchService:
         if state in {"succeeded", "failed"}:
             lease._release_after_terminal(request_id, state)
         return ProviderCompletion(
-            request_id, state, outcome, text_value, input_tokens, output_tokens
+            request_id, state, outcome, text_value, input_tokens, output_tokens, public_error
         )
 
     def mark_unknown(self, lease: CapacityLease) -> bool:

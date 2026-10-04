@@ -598,9 +598,9 @@ async def test_secret_verifier_absence_and_workload_routes_remain_unavailable(
         "invalid_credentials",
     )
     credential = auth(data["api_key"])
-    # Inference remains absent (404); GET-only metadata routes reject POST with 405.
+    # Chat rejects the missing idempotency key; GET-only metadata rejects POST.
     response = await client.post("/v1/chat/completions", headers=credential, json={})
-    assert response.status_code == 404
+    assert response.status_code == 422
     assert (await client.post("/v1/usage", headers=credential, json={})).status_code == 405
     assert (
         await client.post("/v1/models", headers=auth(data["api_key"]), json={})

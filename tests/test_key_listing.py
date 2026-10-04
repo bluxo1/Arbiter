@@ -621,6 +621,6 @@ async def test_database_connection_failure_is_sanitized_and_inference_unavailabl
                 assert "postgres" not in response.text and "password" not in response.text
                 assert (await http.get("/health/live")).status_code == 200
                 assert (await http.get("/health/ready")).status_code == 503
-                assert (await http.post("/v1/chat/completions", json={})).status_code == 404
+                assert (await http.post("/v1/chat/completions", json={})).status_code == 401
     finally:
         engine.dispose()

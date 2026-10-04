@@ -15,6 +15,9 @@ from arbiter.providers.port import ProviderPort
 class ProviderBindingUnavailable(Exception):
     """No trusted binding was captured for this dispatched request."""
 
+    code = "provider_unavailable"
+    status_code = 503
+
 
 @dataclass(frozen=True, slots=True)
 class PinnedModelIdentity:
@@ -33,6 +36,37 @@ class TrustedProviderSelection:
         from arbiter.providers.ollama import OllamaProvider
 
         return OllamaProvider(self.ollama_binding)
+
+
+def reserved_binding_available(
+    transaction: TenantTransaction,
+    binding: KeyBinding,
+    request_id: UUID,
+    revision: int,
+) -> bool:
+    """Check only immutable binding history for the reserved model revision.
+
+    A later operator update cannot change this answer for the old revision;
+    dispatch authorization still checks the current registry revision under lock.
+    """
+    if binding.tenant_id != transaction.context.tenant_id or revision < 1:
+        raise RuntimeError("provider binding tenant or revision mismatch")
+    return bool(
+        transaction.connection()
+        .execute(
+            text("""
+            SELECT arbiter.reserved_provider_binding_available(
+                :tenant,:key,:request,:revision)
+            """),
+            {
+                "tenant": binding.tenant_id,
+                "key": binding.key_id,
+                "request": request_id,
+                "revision": revision,
+            },
+        )
+        .scalar_one()
+    )
 
 
 def dispatched_ollama_binding(

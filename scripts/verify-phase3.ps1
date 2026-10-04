@@ -17,7 +17,7 @@ $name = "arbiter-p34-$Phase-$stamp"
 $evidence = Join-Path $resolvedData "tmp\$name"
 $control = Join-Path $evidence 'control'
 $timingLog = Join-Path $evidence 'fault-timing.jsonl'
-$postgresHealthSeconds = 60
+$postgresHealthSeconds = 180
 $otherHealthSeconds = 40
 $healthPollMilliseconds = 500
 New-Item -ItemType Directory -Path $control -Force | Out-Null
@@ -73,7 +73,7 @@ if ($Phase -eq 'checks') {
             'tests/test_phase3_exit_allocation.py')
     } elseif ($Phase -eq 'boundary') {
         $arguments += @('tests/test_phase3_exit_matrix.py::test_generation_calls_are_confined_to_dispatch_service',
-            'tests/test_phase3_exit_matrix.py::test_only_health_management_and_metadata_http_routes_exist')
+            'tests/test_phase3_exit_matrix.py::test_only_governed_chat_and_existing_http_routes_exist')
     } elseif ($Phase -eq 'p33') {
         $arguments += @('tests/test_governed_execution.py')
     } elseif ($Phase -eq 'migrations') {

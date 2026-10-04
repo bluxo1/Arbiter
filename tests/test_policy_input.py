@@ -68,16 +68,17 @@ def test_cli_invalid_inputs_are_not_echoed(option: str, capsys: pytest.CaptureFi
     assert "sensitive-placeholder" not in captured.out + captured.err
 
 
-def test_no_http_policy_superuser_or_inference(secret_directory: Path) -> None:
+def test_no_http_policy_superuser(secret_directory: Path) -> None:
     with TestClient(create_app()) as client:
         for path in (
             f"/v1/tenants/{uuid4()}/policy",
             "/v1/operator/policy",
-            "/v1/chat/completions",
         ):
             for response in (
                 client.get(path),
                 client.post(path, json={"role": "operator", "tenant_rate": 999}),
             ):
                 assert response.status_code == 404
+        assert client.get("/v1/chat/completions").status_code == 405
+        assert client.post("/v1/chat/completions", json={"role": "operator"}).status_code == 401
         assert client.get("/health/ready").status_code == 503

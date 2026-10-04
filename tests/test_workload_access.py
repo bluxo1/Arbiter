@@ -191,9 +191,9 @@ async def test_forged_body_route_header_model_input_cannot_select_tenant(
         )
     ).status_code == 405
     credential = auth(workloads.key_a.credential.get_secret_value())
-    # Inference remains absent (404); GET-only metadata routes reject POST with 405.
+    # Chat requires idempotency; GET-only metadata routes reject POST with 405.
     response = await client.post("/v1/chat/completions", headers=credential, json={})
-    assert response.status_code == 404
+    assert response.status_code == 422
     assert (await client.post("/v1/usage", headers=credential, json={})).status_code == 405
     assert (await client.get("/health/ready")).status_code == 503
 

@@ -1,4 +1,4 @@
-"""Composition root: health, administration and scoped catalogs; no inference."""
+"""Composition root for management and governed, non-streaming inference."""
 
 import os
 import ssl
@@ -9,7 +9,17 @@ from anyio import create_task_group, sleep, to_thread
 from fastapi import FastAPI
 from sqlalchemy.engine import Engine
 
-from arbiter.config import AuditSettings, DatabaseSettings, KeySettings, OidcSettings
+from arbiter.config import (
+    AuditSettings,
+    DatabaseSettings,
+    FingerprintSettings,
+    KeySettings,
+    OidcSettings,
+    RedisSettings,
+)
+from arbiter.governance.execution import GovernedExecutionService
+from arbiter.governance.fingerprint import Fingerprinter
+from arbiter.governance.rate import RateGate
 from arbiter.identity.access import ManagementAccess
 from arbiter.identity.audit_cursor import AuditCursor
 from arbiter.identity.key_cursor import KeyCursor
@@ -31,6 +41,7 @@ from arbiter.operations.usage import ManagementUsage
 from arbiter.persistence.maintenance import maintenance_engine
 from arbiter.persistence.tenant import runtime_engine
 from arbiter.transport.audit import router as audit_router
+from arbiter.transport.chat import router as chat_router
 from arbiter.transport.health import router as health_router
 from arbiter.transport.keys import router as key_router
 from arbiter.transport.models import router as model_router
@@ -82,6 +93,7 @@ def create_app(
     workload_access: WorkloadAccess | None = None,
     management_models: ManagementModels | None = None,
     model_catalog: ModelCatalog | None = None,
+    chat_service: GovernedExecutionService | None = None,
 ) -> FastAPI:
     """Optional explicit service wiring is for host-side tests, never request input."""
 
@@ -106,6 +118,7 @@ def create_app(
                 workload_access,
                 management_models,
                 model_catalog,
+                chat_service,
             )
         ):
             app.state.audit_service = audit_service
@@ -115,6 +128,7 @@ def create_app(
             app.state.workload_access = workload_access
             app.state.management_models = management_models
             app.state.model_catalog = model_catalog
+            app.state.chat_service = chat_service
             yield
             return
         (
@@ -136,6 +150,14 @@ def create_app(
                 app.state.key_list_service = KeyListService(access, key_cursors)
                 app.state.key_revocation_service = KeyRevocationService(access)
                 app.state.workload_access = WorkloadAccess(key_verifier, engine)
+                fingerprint_settings = FingerprintSettings()
+                app.state.chat_service = GovernedExecutionService(
+                    engine,
+                    key_verifier,
+                    Fingerprinter(fingerprint_settings.key(), fingerprint_settings.version),
+                    RateGate(RedisSettings()),
+                    None,
+                )
                 app.state.model_catalog = catalog
                 app.state.management_models = ManagementModels(access, catalog)
                 app.state.management_usage = ManagementUsage(access)
@@ -172,6 +194,8 @@ def create_app(
                 del app.state.management_usage
             if hasattr(app.state, "maintenance_service"):
                 del app.state.maintenance_service
+            if hasattr(app.state, "chat_service"):
+                del app.state.chat_service
 
     app = FastAPI(debug=False, docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.include_router(health_router)
@@ -179,4 +203,5 @@ def create_app(
     app.include_router(key_router)
     app.include_router(model_router)
     app.include_router(usage_router)
+    app.include_router(chat_router)
     return app

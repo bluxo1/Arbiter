@@ -1,12 +1,14 @@
 # Arbiter
 
-Phase 1/2 foundation and bounded Phase 3 accounting, reservation, dispatch, terminal
-lifecycle and Redis rate governance. Read
+Phase 1/2 foundation, Phase 3 governed accounting and recovery, and a bounded
+Phase 4 non-streaming chat path. Read
 [the agent workflow](docs/Agents.md) and [project memory](docs/Memory.md) before changes.
 The API exposes health, authenticated tenant audit reads, admin key creation/listing/revocation,
 and tenant-approved model catalogs for OIDC members/admins and workload API keys. Liveness returns 200;
 readiness deliberately returns 503 until all required security gates exist.
-Inference, usage and request metadata endpoints remain unavailable; Phase 3 is incomplete.
+`POST /v1/chat/completions` now enters the governed admission and dispatch path.
+Usage and request metadata endpoints expose state and accounting without replaying
+assistant output. Real-model Phase 4 exit evidence remains a separate gate.
 
 Migration `0011_accounting_foundation` adds tenant-owned UTC quota/budget windows,
 request/idempotency records, reservations and append-only accounting events with FORCE RLS.
@@ -23,7 +25,7 @@ preflight capability that reads committed idempotency and rate policy before Red
 the locked reservation then rechecks the policy revision and authority. It does not
 reserve quota or credits before Redis accepts. The existing raw reservation
 component remains an internal PostgreSQL primitive for its established regression tests.
-No public admission or inference route exists.
+The public chat route reuses this admission path and never invokes a provider directly.
 Migration `0013_undispatched_release` adds a separate restricted cleanup capability, using the
 verified in-flight key binding. It releases only reserved requests without a dispatch marker,
 restores the original windows' reserved totals, and commits terminal state, accounting and
@@ -100,9 +102,8 @@ docker compose up -d --wait api ollama
 
 Secret preparation retains existing values. Bootstrap is an explicit, privileged
 local command; it is not part of API startup. Migrations use their own credential.
-The API receives only its runtime password, audit cursor key and API key pepper files.
-Preparation also retains a separate `request_fingerprint_key` for the internal reservation component;
-it is not mounted into or wired to the API yet. `FingerprintSettings` reads that file and its positive
+The API receives its runtime password, audit cursor key, API key pepper and
+`request_fingerprint_key` files. `FingerprintSettings` reads the fingerprint file and its positive
 version (`ARBITER_FINGERPRINT_KEY_FILE`, `ARBITER_FINGERPRINT_VERSION`). Retain the key/version while
 their idempotency records remain in use; rotation/key-ring and tombstone maintenance are not implemented.
 Keep secret values outside Git;

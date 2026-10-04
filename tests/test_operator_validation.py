@@ -47,7 +47,7 @@ def test_argument_errors_do_not_echo_rejected_values(
     assert "credential-placeholder" not in captured.err + captured.out
 
 
-def test_api_contains_no_operator_or_inference_routes(
+def test_api_contains_no_operator_routes(
     secret_directory: Path,
 ) -> None:
     with TestClient(create_app()) as client:
@@ -55,7 +55,8 @@ def test_api_contains_no_operator_or_inference_routes(
             "/v1/operator",
             "/v1/tenants",
             "/v1/tenants/forged/members",
-            "/v1/chat/completions",
         ):
             assert client.get(path).status_code == 404
             assert client.post(path, json={"role": "operator"}).status_code == 404
+        assert client.get("/v1/chat/completions").status_code == 405
+        assert client.post("/v1/chat/completions", json={"role": "operator"}).status_code == 401

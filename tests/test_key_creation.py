@@ -168,7 +168,7 @@ async def test_success_returns_only_once_and_persists_hmac_with_matching_audit(
     ).status_code == 200
     assert (
         await client.post("/v1/chat/completions", headers=auth(value), json={})
-    ).status_code == 404
+    ).status_code == 422
     assert_error(
         await client.get(f"/v1/tenants/{members.tenant_b}/audit", headers=auth(value)),
         401,

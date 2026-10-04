@@ -517,12 +517,12 @@ async def test_default_query_has_bound_context_and_limit_51(
     assert observed[0][1]["limit"] == 51 and "provider_models" not in observed[0][0]
 
 
-async def test_inference_and_operator_routes_remain_unavailable(
+async def test_chat_requires_idempotency_and_operator_route_remains_unavailable(
     client: httpx.AsyncClient, catalogs: Catalogs
 ) -> None:
     assert (
         await client.post("/v1/chat/completions", headers=workload_headers(catalogs), json={})
-    ).status_code == 404
+    ).status_code == 422
     assert (await client.get("/v1/operator/models")).status_code == 404
     assert (await client.get("/health/ready")).status_code == 503
 

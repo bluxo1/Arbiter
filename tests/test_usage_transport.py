@@ -46,6 +46,9 @@ def secret_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     pepper_file = directory / "api_key_pepper"
     pepper_file.write_bytes(base64.b64encode(bytes(32)))
     monkeypatch.setenv("ARBITER_KEYS_PEPPER_FILE", str(pepper_file))
+    fingerprint_file = directory / "request_fingerprint_key"
+    fingerprint_file.write_bytes(base64.b64encode(bytes(32)))
+    monkeypatch.setenv("ARBITER_FINGERPRINT_KEY_FILE", str(fingerprint_file))
     monkeypatch.setenv("ARBITER_KEYS_PEPPER_VERSION", "1")
     monkeypatch.setenv("ARBITER_OIDC_ISSUER", "https://fixture.invalid/issuer")
     monkeypatch.setenv("ARBITER_OIDC_AUDIENCE", "arbiter-api")

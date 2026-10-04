@@ -22,6 +22,9 @@ def secret_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     pepper_file = directory / "api_key_pepper"
     pepper_file.write_bytes(base64.b64encode(bytes(32)))
     monkeypatch.setenv("ARBITER_KEYS_PEPPER_FILE", str(pepper_file))
+    fingerprint_file = directory / "request_fingerprint_key"
+    fingerprint_file.write_bytes(base64.b64encode(bytes(32)))
+    monkeypatch.setenv("ARBITER_FINGERPRINT_KEY_FILE", str(fingerprint_file))
     monkeypatch.setenv("ARBITER_KEYS_PEPPER_VERSION", "1")
     monkeypatch.setenv("ARBITER_OIDC_ISSUER", "https://fixture.invalid/issuer")
     monkeypatch.setenv("ARBITER_OIDC_AUDIENCE", "arbiter-api")
@@ -41,11 +44,13 @@ def test_health_stays_fail_closed(secret_directory: Path) -> None:
 
 @pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/usage", "/v1/models"])
 @pytest.mark.parametrize("tenant", ["tenant-a", "tenant-b"])
-def test_no_tenant_or_provider_route(secret_directory: Path, path: str, tenant: str) -> None:
+def test_tenant_header_does_not_select_inference_authority(
+    secret_directory: Path, path: str, tenant: str
+) -> None:
     with TestClient(create_app()) as client:
         response = client.post(path, headers={"X-Tenant-ID": tenant}, json={"tenant_id": tenant})
-        # GET-only metadata routes reject POST with 405; inference remains absent.
-        assert response.status_code == (405 if path in {"/v1/models", "/v1/usage"} else 404)
+        # GET-only metadata routes reject POST; chat requires an API key.
+        assert response.status_code == (405 if path in {"/v1/models", "/v1/usage"} else 401)
 
 
 def test_provider_invocation_stays_inside_dispatch_service() -> None:

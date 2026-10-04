@@ -11,6 +11,7 @@ import pytest
 
 Operation = Literal["redis_stop", "redis_start", "redis_restart", "postgres_stop", "postgres_start"]
 HOST_REPLY_TIMEOUT_SECONDS = 90
+POSTGRES_START_REPLY_TIMEOUT_SECONDS = 240
 HOST_REPLY_POLL_SECONDS = 0.1
 
 
@@ -21,8 +22,13 @@ def request_host(operation: Operation) -> None:
     request, reply = root / f"{ticket}.request.json", root / f"{ticket}.reply.json"
     temporary.write_text(json.dumps({"operation": operation}), encoding="utf-8")
     temporary.rename(request)
-    # The host may spend 60 seconds on PostgreSQL health after docker start.
-    deadline = monotonic() + HOST_REPLY_TIMEOUT_SECONDS
+    # PostgreSQL recovery may use the full 180-second health wait after docker start.
+    reply_timeout = (
+        POSTGRES_START_REPLY_TIMEOUT_SECONDS
+        if operation == "postgres_start"
+        else HOST_REPLY_TIMEOUT_SECONDS
+    )
+    deadline = monotonic() + reply_timeout
     while monotonic() < deadline:
         if reply.is_file():
             result = json.loads(reply.read_text(encoding="utf-8"))

@@ -11,8 +11,8 @@ pinned digest, bounded messages, output cap, and opaque request correlation.
 It carries no endpoint, native model string, provider options, tools, retry,
 fallback, or model-pull instruction. `DispatchService.run_double_once` remains
 the sole production call site for `generate`; its name is retained for Phase 3
-test compatibility. The internal `GovernedExecutionService` still selects only
-the deterministic double, and no HTTP inference route exists in this slice.
+test compatibility. `GovernedExecutionService` uses the deterministic double in
+Phase 3 tests and the dispatch-captured Ollama binding for public chat.
 
 `ProviderResult` carries assistant text, optional input/output token counts,
 and a finite finish reason. The finish reason is the only safe provider metadata
@@ -45,7 +45,7 @@ provider receives the absolute deadline and may report an inconclusive timeout.
 `OllamaProvider` now runs the same reusable contract through a counted fake
 transport. Its operator-constructed binding maps the dispatch snapshot's exact
 model UUID and digest to one local native tag; the approved alias registry and
-public inference transport remain separate Phase 4 deliverables. Validation
+public inference transport are separate Phase 4 layers. Validation
 uses bounded `GET /api/tags` to check the local tag and digest, without a chat
 request. The API joins the private Compose provider network, but no production
 selection wiring or public generation route is added in this slice.
@@ -70,5 +70,32 @@ cannot retarget dispatched work; an earlier update invalidates the old reserved
 revision. Runtime can read the selected tag only through a scoped dispatched-
 request capability, using the pinned UUID/digest/revision. Missing or mismatched
 bindings fail closed. No caller field, alias conversion, or live Ollama discovery
-chooses a native tag. Public chat composition and real-model generation remain
-future Phase 4 work.
+chooses a native tag. Real-model generation remains a separate Phase 4 exit gate.
+
+## Governed non-streaming chat
+
+`POST /v1/chat/completions` accepts an API-key Bearer credential with
+`inference:write`, exactly one `Idempotency-Key`, and JSON containing the
+approved public `model` alias, 1–32 bounded text messages, and optional
+`max_output_tokens` (default 256). The raw body is capped at 64 KiB, combined
+message text at 32 KiB of UTF-8, and output tokens at 1–1,024 plus the model
+cap. Extra fields, streaming, tools, endpoint choices and provider options are
+rejected. The route enters the existing governed admission service; it does not
+call Ollama. A server-owned 120-second absolute deadline starts at execution
+entry and is passed unchanged to dispatch and provider generation.
+
+The service checks immutable binding history for the reserved model revision
+before dispatch. Dispatch authorization still locks and validates the current
+model revision, then captures the binding in its commit. The selected provider
+uses that captured UUID/digest/revision binding, even if the operator updates
+the current binding afterward. Missing bindings release before dispatch; there
+is no alias-to-native-tag conversion, discovery authority, retry, or fallback.
+
+The first successful caller receives a transient assistant message, public
+alias, request ID, optional token telemetry, and fixed charged credits. No
+assistant output is stored. A matching idempotency retry returns 409
+`request_already_admitted` with existing request ID/state and a relative
+`/v1/requests/{request_id}` status URL; it never calls the provider again.
+Failures use sanitized public codes. Definite terminal outcomes release local
+capacity once. Inconclusive post-dispatch outcomes retain committed accounting
+and quarantine capacity under the existing Phase 3 rules.

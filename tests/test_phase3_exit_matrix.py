@@ -404,7 +404,7 @@ def test_generation_calls_are_confined_to_dispatch_service() -> None:
     assert sites == [("governance/dispatch.py", "run_double_once")]
 
 
-def test_only_health_management_and_metadata_http_routes_exist() -> None:
+def test_only_governed_chat_and_existing_http_routes_exist() -> None:
     allowed = {
         ("GET", "/health/live"),
         ("GET", "/health/ready"),
@@ -418,6 +418,7 @@ def test_only_health_management_and_metadata_http_routes_exist() -> None:
         ("GET", "/v1/tenants/{tenant_id}/keys"),
         ("POST", "/v1/tenants/{tenant_id}/keys"),
         ("POST", "/v1/tenants/{tenant_id}/keys/{key_id}/revoke"),
+        ("POST", "/v1/chat/completions"),
     }
     actual: set[tuple[str, str]] = set()
 

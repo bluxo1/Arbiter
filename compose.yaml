@@ -30,7 +30,7 @@ services:
     configs:
       - source: oidc_ca
         target: /run/config/oidc-ca.pem
-    secrets: [db_runtime_password, db_maintenance_password, audit_cursor_key, api_key_pepper]
+    secrets: [db_runtime_password, db_maintenance_password, audit_cursor_key, api_key_pepper, request_fingerprint_key]
     ports: ["127.0.0.1:${ARBITER_API_PORT:-8000}:8000"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -188,6 +188,8 @@ volumes:
       device: ${ARBITER_DATA_LINUX_ROOT:?Set the Linux-visible Arbiter data root}/ollama/models
 
 secrets:
+  request_fingerprint_key:
+    file: ${ARBITER_SECRETS_DIR:?Set the protected secret directory}/request_fingerprint_key
   api_key_pepper:
     file: ${ARBITER_SECRETS_DIR:?Set the protected secret directory}/api_key_pepper
   audit_cursor_key:
