@@ -65,7 +65,7 @@ All identifiers are server-generated UUIDs unless stated otherwise. Store timest
 
 Tenant-owned records carry non-null `tenant_id`; parent relationships use `(tenant_id, id)` foreign keys. RLS checks both visibility and writes against transaction-local authenticated context. Tenant/member lookup required to establish context uses narrow identity access, not arbitrary global repositories. Global model configuration cannot contain tenant content.
 
-Runtime grants prohibit audit/accounting UPDATE or DELETE. Mutations, reservations, and dispatch transitions append their evidence in the same transaction. Aggregate windows remain retained for 13 months. Revoked key records remain while referenced.
+Runtime grants prohibit audit/accounting UPDATE or DELETE. Mutations, reservations, and dispatch transitions append their evidence in the same transaction. Retention durations are minimum periods: passing a threshold makes an otherwise-safe row eligible for privileged cleanup, never requires immediate deletion. Arbiter v0.1 uses explicit bounded operator maintenance, not a background purger.
 
 ### Retained-request cleanup and idempotency tombstones
 
@@ -82,6 +82,20 @@ The workload request-status URL for a retained tombstone returns HTTP 410 `reque
 The 90-day rule permits expired per-request accounting/audit evidence to be deleted only through a dedicated privileged retention execution path. Runtime receives no generic DELETE privilege. Accounting UPDATE/TRUNCATE remain prohibited, and immutability is not disabled globally. Every deleted row must independently meet the retention predicate. Cleanup explicitly removes eligible dependent metadata through the current foreign-key graph; broad `ON DELETE CASCADE` is forbidden. Per-request cleanup never decrements, recomputes or mutates aggregate quota/budget totals, and it preserves global provider-binding/registry history.
 
 Every successful privileged cleanup transaction or batch appends fresh content-free audit evidence recording the operator actor, retention cutoff, operation/correlation ID, sanitized counts of objects removed, UTC timestamp and successful outcome. That new audit record begins its own 90-day retention period at `occurred_at`. Cleanup is idempotent under retry, restart and concurrency and must serialize safely with admission.
+
+### Aggregate windows and standalone audit retention
+
+Quota and budget windows remain retained for at least 13 calendar months after their UTC window closes. A quota window closes at `window_start + interval '1 day'`; a budget window closes at `window_start + interval '1 month'`. Using UTC calendar arithmetic, each becomes age-eligible when `window_end + interval '13 months' <= authoritative cleanup time`, inclusively. Age alone never permits deletion: no retained request, reservation, accounting graph or other durable reference may still require the window. Unresolved and definite retained requests both protect their windows. Quota and budget rows may qualify independently. Cleanup only deletes eligible unreferenced rows; it never updates, zeros or recomputes committed/reserved counters, uses broad CASCADE, or disables FK enforcement.
+
+Tenant audit metadata has a minimum 90-day retention period from `audit_events.occurred_at`, with independent age eligibility at `occurred_at + interval '90 days' <= authoritative cleanup time`, inclusively. Request-linked reservation/release/dispatch/terminal evidence must never use standalone cleanup: it remains exclusively subject to the retained-request graph and tombstone predicates above. Standalone audit evidence qualifies only when it is outside any retained request graph and no FK or other durable reference requires it. API-key creation, tenant-policy, capacity-clearance and any other inbound references protect audit evidence.
+
+`retention_cleaned` evidence has its own independent 90-day clock from `occurred_at`. A later cleanup may remove an otherwise-unreferenced eligible row. Each successful batch selects eligible old evidence before appending its fresh audit, and independent age guards prevent deletion of that new evidence in its creation transaction. Fresh summaries contain only operator actor, cutoff(s), operation/correlation ID, sanitized quota-window/budget-window/standalone-audit removal counts, timestamp and successful outcome; never tenant content, prompts, completions, credentials, tokens or provider payloads/responses.
+
+Aggregate and standalone-audit cleanup reuse the narrow retention authority. Runtime receives no generic DELETE; PUBLIC cannot execute privileged functions. SECURITY DEFINER functions have fixed `search_path=pg_catalog`, the narrow retention owner, independent operator/session checks, matching transaction-local tenant context and FORCE RLS. Caller parameters or GUC manipulation cannot broaden authority. Independent audit deletion must preserve both explicit safe paths: the existing request-retirement predicate and the separate standalone age/reference predicate, with no request evidence qualifying through the latter.
+
+Cleanup is tenant-scoped, bounded and atomic. It preserves the established lock order `tenant -> key -> quota -> budget` wherever those locks are needed; an earlier lock is never acquired after a later one. Admission, revocation, request retirement and concurrent cleanup serialize safely, and any failure rolls back deletion and fresh audit together.
+
+API-key deletion is not part of Arbiter v0.1. Active and revoked key records remain durable even when unreferenced; no key-deletion deadline or purge function exists. Revocation remains irreversible. The existing unrevoked/revoked tombstone lifetime is unchanged, and removing an eligible tombstone never implies removing its key. Future key deletion requires an explicit new policy.
 
 ### Global model-registry journal
 

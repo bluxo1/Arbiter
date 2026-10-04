@@ -98,11 +98,114 @@ def migrate_to(engine: Engine, revision: str, *, downgrade: bool = False) -> Non
             command.upgrade(config, revision)
 
 
+def test_history_retention_upgrade_privileges_and_round_trip(disposable_database: Engine) -> None:
+    migrate_to(disposable_database, "0020_request_retention")
+    migrate_to(disposable_database, "head")
+    with disposable_database.begin() as connection:
+        assert (
+            connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
+            == "0021_history_retention"
+        )
+        row = connection.execute(
+            text(
+                "SELECT prosecdef,proconfig,pg_get_userbyid(proowner) AS owner FROM pg_proc "
+                "WHERE oid='arbiter.retire_history(uuid,timestamptz,uuid,integer)'::regprocedure"
+            )
+        ).one()
+        assert row.prosecdef and row.owner == "arbiter_retention_writer"
+        assert row.proconfig == ["search_path=pg_catalog"]
+        assert not connection.execute(
+            text(
+                "SELECT EXISTS (SELECT 1 FROM pg_proc p,"
+                "LATERAL aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) a "
+                "WHERE p.oid='arbiter.retire_history(uuid,timestamptz,uuid,integer)'::regprocedure "
+                "AND a.grantee=0 AND a.privilege_type='EXECUTE')"
+            )
+        ).scalar_one()
+        for role in ("arbiter_runtime", "arbiter_maintenance"):
+            assert not connection.execute(
+                text(
+                    "SELECT has_function_privilege(:role,"
+                    "'arbiter.retire_history(uuid,timestamptz,uuid,integer)','EXECUTE')"
+                ),
+                {"role": role},
+            ).scalar_one()
+        assert connection.execute(
+            text(
+                "SELECT has_function_privilege('arbiter_operator',"
+                "'arbiter.retire_history(uuid,timestamptz,uuid,integer)','EXECUTE')"
+            )
+        ).scalar_one()
+        for table in (
+            "quota_windows",
+            "budget_windows",
+            "audit_events",
+            "api_keys",
+            "tenant_policies",
+        ):
+            assert connection.execute(
+                text(
+                    "SELECT relrowsecurity AND relforcerowsecurity FROM pg_class "
+                    "WHERE oid=CAST(:table AS regclass)"
+                ),
+                {"table": "arbiter." + table},
+            ).scalar_one()
+            assert not connection.execute(
+                text("SELECT has_table_privilege('arbiter_runtime',:table,'DELETE,TRUNCATE')"),
+                {"table": "arbiter." + table},
+            ).scalar_one()
+        for table in ("quota_windows", "budget_windows"):
+            assert connection.execute(
+                text("SELECT has_table_privilege('arbiter_retention_writer',:table,'DELETE')"),
+                {"table": "arbiter." + table},
+            ).scalar_one()
+            assert not connection.execute(
+                text(
+                    "SELECT has_table_privilege('arbiter_retention_writer',"
+                    ":table,'UPDATE,TRUNCATE,INSERT')"
+                ),
+                {"table": "arbiter." + table},
+            ).scalar_one()
+        assert not connection.execute(
+            text(
+                "SELECT has_table_privilege('arbiter_retention_writer','arbiter.api_keys','DELETE')"
+            )
+        ).scalar_one()
+        assert (
+            connection.execute(
+                text(
+                    "SELECT count(*) FROM pg_constraint WHERE contype='f' AND confdeltype='c' "
+                    "AND confrelid IN ('arbiter.quota_windows'::regclass,"
+                    "'arbiter.budget_windows'::regclass,'arbiter.audit_events'::regclass)"
+                )
+            ).scalar_one()
+            == 0
+        )
+    migrate_to(disposable_database, "0020_request_retention", downgrade=True)
+    with disposable_database.begin() as connection:
+        assert (
+            connection.execute(
+                text(
+                    "SELECT to_regprocedure"
+                    "('arbiter.retire_history(uuid,timestamptz,uuid,integer)')"
+                )
+            ).scalar_one()
+            is None
+        )
+        assert not connection.execute(
+            text(
+                "SELECT has_table_privilege('arbiter_retention_writer',"
+                "'arbiter.quota_windows','DELETE')"
+            )
+        ).scalar_one()
+    migrate_to(disposable_database, "head")
+
+
 def test_retention_migration_from_previous_grants_rls_and_round_trip(
     disposable_database: Engine,
 ) -> None:
     migrate_to(disposable_database, "0019_reserved_provider_binding")
-    migrate_to(disposable_database, "head")
+    migrate_to(disposable_database, "0020_request_retention")
     with disposable_database.begin() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
@@ -185,7 +288,7 @@ def test_maintenance_recovery_migration_restricts_discovery_and_round_trips(
     with engine.begin() as connection:
         assert connection.execute(
             text("SELECT version_num FROM public.alembic_version")
-        ).scalar_one() == ("0020_request_retention")
+        ).scalar_one() == ("0021_history_retention")
         assert connection.execute(
             text("""
                 SELECT c.relrowsecurity AND c.relforcerowsecurity
@@ -295,7 +398,7 @@ def test_dispatch_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0020_request_retention"
+                == "0021_history_retention"
             )
             set_context(connection, actor.tenant)
             assert connection.execute(
@@ -380,7 +483,7 @@ def test_terminal_upgrade_preserves_dispatched_request_and_refuses_evidence_loss
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0020_request_retention"
+                == "0021_history_retention"
             )
     finally:
         runtime.dispose()
@@ -454,7 +557,7 @@ def test_release_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0020_request_retention"
+                == "0021_history_retention"
             )
             set_context(connection, actor.tenant)
             assert connection.execute(
@@ -565,7 +668,7 @@ def test_reservation_upgrade_preserves_legacy_evidence_and_blocks_lossy_downgrad
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0020_request_retention"
+                == "0021_history_retention"
             )
     finally:
         runtime.dispose()
@@ -660,7 +763,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
     with engine.begin() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
-            == "0020_request_retention"
+            == "0021_history_retention"
         )
         assert (
             connection.execute(

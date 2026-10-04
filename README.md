@@ -226,6 +226,16 @@ audit with the cutoff and removal counts. Matching retries remain 409
 90 days after key revocation; expiration alone does not permit deletion. This
 explicit command has no runtime HTTP surface or automatic cleanup scheduler.
 
+After migration `0021_history_retention`, `operator retire-history --tenant
+<tenant-uuid> --limit 100` independently removes up to 100 eligible quota windows,
+100 budget windows and 100 standalone audit events in one audited transaction.
+Windows qualify only 13 UTC calendar months after closing and while unreferenced;
+standalone audits qualify after 90 days and while unreferenced. Request audit
+evidence remains subject to request retirement. Fresh cleanup evidence starts a
+new 90-day period. Counters are never reset or recomputed. API keys are not purged,
+including revoked unreferenced keys. Run explicit request retirement first when
+its retained graph is what protects older windows.
+
 The API runs a 10-second maintenance pass. It releases reservations older than
 30 seconds under the database state/row locks. At startup it marks prior
 nonterminal dispatched work `unknown`; that work retains effective capacity and

@@ -161,6 +161,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     retention_parser.add_argument("--tenant", required=True, type=UUID)
     retention_parser.add_argument("--key", required=True, type=UUID)
     retention_parser.add_argument("--limit", type=int, default=100)
+    history_parser = commands.add_parser("retire-history")
+    history_parser.add_argument("--tenant", required=True, type=UUID)
+    history_parser.add_argument("--limit", type=int, default=100)
     status_parser = commands.add_parser("set-tenant-status")
     status_parser.add_argument("--tenant", required=True, type=UUID)
     status_parser.add_argument("--status", required=True, choices=("active", "suspended"))
@@ -217,7 +220,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         engine = operator_engine(DatabaseSettings())
         service = ProvisioningService(engine)
-        if args.command == "retire-requests":
+        if args.command == "retire-history":
+            history_result = RetentionService(engine).retire_history(args.tenant, limit=args.limit)
+            print(json.dumps(asdict(history_result), default=str))
+            return
+        elif args.command == "retire-requests":
             result_retention = RetentionService(engine).run_once(
                 args.tenant, args.key, limit=args.limit
             )
