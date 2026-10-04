@@ -21,6 +21,7 @@ from arbiter.operations.registry import (
     RegistryService,
     read_approval,
 )
+from arbiter.operations.retention import RetentionService
 from arbiter.persistence.operator import OperatorRepository, operator_engine, operator_transaction
 
 TenantStatus = Literal["active", "suspended"]
@@ -156,6 +157,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser = OperatorParser(description="Local, separately credentialed Arbiter operator")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("create-tenant")
+    retention_parser = commands.add_parser("retire-requests")
+    retention_parser.add_argument("--tenant", required=True, type=UUID)
+    retention_parser.add_argument("--key", required=True, type=UUID)
+    retention_parser.add_argument("--limit", type=int, default=100)
     status_parser = commands.add_parser("set-tenant-status")
     status_parser.add_argument("--tenant", required=True, type=UUID)
     status_parser.add_argument("--status", required=True, choices=("active", "suspended"))
@@ -212,7 +217,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         engine = operator_engine(DatabaseSettings())
         service = ProvisioningService(engine)
-        if args.command == "bind-native-model":
+        if args.command == "retire-requests":
+            result_retention = RetentionService(engine).run_once(
+                args.tenant, args.key, limit=args.limit
+            )
+            print(json.dumps(asdict(result_retention), default=str))
+            return
+        elif args.command == "bind-native-model":
             registry_result = RegistryService(engine).bind_native_model(
                 NativeBindingInput(
                     args.model_id, args.expected_revision, args.provider_kind, args.native_name

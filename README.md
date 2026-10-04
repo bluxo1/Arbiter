@@ -207,6 +207,25 @@ an individually authenticated human. Runtime cannot insert operator-labelled
 audit rows, invoke operator services, or change tenant/member state. No command
 adds an HTTP route or enables inference.
 
+After explicit bootstrap and migration `0020_request_retention`, the local
+operator can retire up to 100 eligible requests and expire up to 100 eligible
+tombstones for one tenant/key in a transaction:
+
+```powershell
+docker compose --profile operations run --rm operator retire-requests `
+  --tenant <tenant-uuid> --key <key-uuid> --limit 100
+```
+
+Only definite terminal requests finished at least 90 days ago qualify. Unknown
+work remains retained even after capacity clearance. Cleanup creates minimal
+idempotency tombstones before deleting the request graph, preserves aggregate
+totals and global model/binding history, and appends a content-free operator
+audit with the cutoff and removal counts. Matching retries remain 409
+`request_already_admitted`; retained tombstone status URLs return 410
+`request_retired` with only request ID and final state. Tombstones remain until
+90 days after key revocation; expiration alone does not permit deletion. This
+explicit command has no runtime HTTP surface or automatic cleanup scheduler.
+
 The API runs a 10-second maintenance pass. It releases reservations older than
 30 seconds under the database state/row locks. At startup it marks prior
 nonterminal dispatched work `unknown`; that work retains effective capacity and

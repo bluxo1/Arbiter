@@ -65,7 +65,23 @@ All identifiers are server-generated UUIDs unless stated otherwise. Store timest
 
 Tenant-owned records carry non-null `tenant_id`; parent relationships use `(tenant_id, id)` foreign keys. RLS checks both visibility and writes against transaction-local authenticated context. Tenant/member lookup required to establish context uses narrow identity access, not arbitrary global repositories. Global model configuration cannot contain tenant content.
 
-Runtime grants prohibit audit/accounting UPDATE or DELETE. Mutations, reservations, and dispatch transitions append their evidence in the same transaction. Metadata retention defaults to 90 days for terminal requests/audit/accounting and 13 months for aggregate windows. Unresolved requests are never purged. Retain minimal idempotency tombstones for the lifetime of the key plus 90 days so old retries cannot redispatch. Cleanup is a privileged, audited maintenance operation; revoked key records remain while referenced.
+Runtime grants prohibit audit/accounting UPDATE or DELETE. Mutations, reservations, and dispatch transitions append their evidence in the same transaction. Aggregate windows remain retained for 13 months. Revoked key records remain while referenced.
+
+### Retained-request cleanup and idempotency tombstones
+
+Per-request request, reservation, accounting and audit metadata becomes eligible for privileged retention cleanup no earlier than 90 days after `request.finished_at`. Only definite terminal states (`succeeded`, `failed`, `released`, `rejected_capacity`) qualify. `reserved`, `dispatched` and `unknown` are unresolved and must never be purged, regardless of age. Administrative clearance of unknown capacity does not make the provider outcome definite or the request purgeable.
+
+Before deleting an eligible request graph, the same PostgreSQL transaction preserves a minimal tenant-owned idempotency tombstone containing exactly `tenant_id`, `key_id`, `idempotency_key`, original `request_id`, `payload_hmac`, `fingerprint_version`, final request state and `tombstoned_at`. It retains no prompt/completion text, provider response, model configuration, token usage, credit metadata or policy snapshots. Fail-closed tenant RLS and uniqueness on `(tenant_id,key_id,idempotency_key)` and original request identity protect tombstones.
+
+A matching retry against a tombstone returns 409 `request_already_admitted` with the original request ID, preserved final state and `/v1/requests/{original_request_id}`. A different fingerprint returns 409 `idempotency_conflict`, exactly as for a live request. Neither retry reserves, dispatches, invokes a provider or reconstructs output. Tombstone creation and request-graph deletion are atomic and use the existing tenant/key admission lock order, so no live-request/tombstone visibility gap can permit redispatch.
+
+The workload request-status URL for a retained tombstone returns HTTP 410 `request_retired` with the original request ID and preserved final state, without deleted usage/accounting/model/output metadata. The management request-status route follows the same scoped metadata contract.
+
+`api_keys.revoked_at` defines the end of a key's lifetime for tombstone retention. While it is NULL, that key's tombstones remain indefinitely, including after key expiration. After revocation, a tombstone may be removed only at or after `revoked_at + interval '90 days'`. A retained live request itself satisfies idempotency retention until purge; while this contract requires protection, either the request or its tombstone must exist.
+
+The 90-day rule permits expired per-request accounting/audit evidence to be deleted only through a dedicated privileged retention execution path. Runtime receives no generic DELETE privilege. Accounting UPDATE/TRUNCATE remain prohibited, and immutability is not disabled globally. Every deleted row must independently meet the retention predicate. Cleanup explicitly removes eligible dependent metadata through the current foreign-key graph; broad `ON DELETE CASCADE` is forbidden. Per-request cleanup never decrements, recomputes or mutates aggregate quota/budget totals, and it preserves global provider-binding/registry history.
+
+Every successful privileged cleanup transaction or batch appends fresh content-free audit evidence recording the operator actor, retention cutoff, operation/correlation ID, sanitized counts of objects removed, UTC timestamp and successful outcome. That new audit record begins its own 90-day retention period at `occurred_at`. Cleanup is idempotent under retry, restart and concurrency and must serialize safely with admission.
 
 ### Global model-registry journal
 

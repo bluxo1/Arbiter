@@ -7,6 +7,7 @@ from arbiter.identity.access import AuthorizedMember, ManagementAccess
 from arbiter.persistence.tenant import TenantTransaction
 from arbiter.persistence.usage import (
     RequestStatus,
+    RetiredRequest,
     UsageRepository,
     UsageTotals,
     UsageUnit,
@@ -57,7 +58,9 @@ class UsageReader:
     def totals(self, scoped: TenantTransaction, unit: UsageUnit, start: datetime) -> UsageTotals:
         return UsageRepository(scoped).totals(unit, start)
 
-    def request_status(self, scoped: TenantTransaction, request_id: UUID) -> RequestStatus | None:
+    def request_status(
+        self, scoped: TenantTransaction, request_id: UUID
+    ) -> RequestStatus | RetiredRequest | None:
         return UsageRepository(scoped).request_status(request_id)
 
 
@@ -95,8 +98,10 @@ class ManagementUsage:
 
     async def request_status(
         self, token: str, selector: UUID, request_id: UUID
-    ) -> RequestStatus | None:
-        def read(member: AuthorizedMember, scoped: TenantTransaction) -> RequestStatus | None:
+    ) -> RequestStatus | RetiredRequest | None:
+        def read(
+            member: AuthorizedMember, scoped: TenantTransaction
+        ) -> RequestStatus | RetiredRequest | None:
             del member
             return UsageReader().request_status(scoped, request_id)
 

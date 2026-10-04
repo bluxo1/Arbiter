@@ -5,9 +5,11 @@ it does not enforce Redis rate, obtain provider capacity or authorize dispatch.
 Success is returned only after the transaction and deferred constraints commit.
 """
 
+import json
 from dataclasses import dataclass
 from uuid import UUID
 
+import psycopg
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -86,6 +88,18 @@ def _database_error(error: DBAPIError) -> Exception:
         return MissingScope()
     if code == "AR003":
         return IdempotencyConflict()
+    if code == "AR009":
+        try:
+            if not isinstance(error.orig, psycopg.Error):
+                raise ValueError("invalid retained receipt")
+            detail = json.loads(error.orig.diag.message_detail or "")
+            identifier = UUID(detail["request_id"])
+            state = detail["state"]
+            if state not in {"succeeded", "failed", "released", "rejected_capacity"}:
+                raise ValueError("invalid retained state")
+        except (AttributeError, TypeError, ValueError, KeyError):
+            return ReservationUnavailable()
+        return RequestAlreadyAdmitted(identifier, state)
     if code == "AR004":
         return ModelDenied()
     if code in {"AR005", "AR006", "AR007"}:

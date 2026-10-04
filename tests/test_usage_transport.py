@@ -115,6 +115,7 @@ class FakeStore:
         self.context = TenantContext(TENANT)
         self.totals: dict[tuple[UUID, datetime], SimpleNamespace] = {}
         self.requests: dict[UUID, SimpleNamespace] = {}
+        self.retired: dict[UUID, SimpleNamespace] = {}
 
     def connection(self) -> "FakeConnection":
         return FakeConnection(self)
@@ -132,6 +133,8 @@ class FakeConnection:
         sql = str(statement)
         if "FROM arbiter.requests" in sql:
             row = self._store.requests.get(cast(UUID, params["request"]))
+        elif "FROM arbiter.idempotency_tombstones" in sql:
+            row = self._store.retired.get(cast(UUID, params["request"]))
         else:
             key = (cast(UUID, params["tenant"]), cast(datetime, params["start"]))
             row = self._store.totals.get(key)
@@ -194,6 +197,20 @@ def seeded_store(request_id: UUID) -> FakeStore:
         )
     store.requests[request_id] = unknown_request_row(request_id)
     return store
+
+
+def test_management_retired_request_returns_minimal_410() -> None:
+    identifier = uuid4()
+    store = FakeStore()
+    store.retired[identifier] = SimpleNamespace(request_id=identifier, state="succeeded")
+    with TestClient(metadata_app(FakeManagementAccess(store))) as client:
+        response = client.get(f"/v1/tenants/{TENANT}/requests/{identifier}", headers=AUTH)
+    assert response.status_code == 410
+    assert response.json() == {
+        "error": {"code": "request_retired", "message": "Request retired"},
+        "request_id": str(identifier),
+        "state": "succeeded",
+    }
 
 
 def test_management_current_and_historical_usage(secret_directory: Path) -> None:

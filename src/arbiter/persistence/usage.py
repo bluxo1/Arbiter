@@ -40,6 +40,12 @@ class RequestStatus:
     finished_at: datetime | None
 
 
+@dataclass(frozen=True, slots=True)
+class RetiredRequest:
+    id: UUID
+    state: str
+
+
 # Static statements only; no caller-controlled identifiers enter SQL text.
 _TOTALS_STATEMENTS = {
     "day": text(
@@ -82,7 +88,7 @@ class UsageRepository:
             return UsageTotals(unit, window_start, 0, 0)
         return UsageTotals(unit, row.window_start, row.committed, row.reserved)
 
-    def request_status(self, request_id: UUID) -> RequestStatus | None:
+    def request_status(self, request_id: UUID) -> RequestStatus | RetiredRequest | None:
         row = (
             self._connection()
             .execute(
@@ -92,8 +98,18 @@ class UsageRepository:
             .one_or_none()
         )
         if row is None:
-            # Same absence for foreign and nonexistent objects; no existence disclosure.
-            return None
+            retired = (
+                self._connection()
+                .execute(
+                    text(
+                        "SELECT request_id,state FROM arbiter.idempotency_tombstones "
+                        "WHERE tenant_id=:tenant AND request_id=:request"
+                    ),
+                    {"tenant": self._transaction.context.tenant_id, "request": request_id},
+                )
+                .one_or_none()
+            )
+            return None if retired is None else RetiredRequest(retired.request_id, retired.state)
         return RequestStatus(
             row.id,
             row.state,

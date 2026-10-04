@@ -98,6 +98,85 @@ def migrate_to(engine: Engine, revision: str, *, downgrade: bool = False) -> Non
             command.upgrade(config, revision)
 
 
+def test_retention_migration_from_previous_grants_rls_and_round_trip(
+    disposable_database: Engine,
+) -> None:
+    migrate_to(disposable_database, "0019_reserved_provider_binding")
+    migrate_to(disposable_database, "head")
+    with disposable_database.begin() as connection:
+        assert (
+            connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
+            == "0020_request_retention"
+        )
+        assert connection.execute(
+            text(
+                "SELECT relrowsecurity AND relforcerowsecurity FROM pg_class "
+                "WHERE oid='arbiter.idempotency_tombstones'::regclass"
+            )
+        ).scalar_one()
+        assert (
+            connection.execute(
+                text(
+                    "SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE "
+                    "oid='arbiter.retire_requests(uuid,uuid,timestamptz,uuid,integer)'::regprocedure"
+                )
+            ).scalar_one()
+            == "arbiter_retention_writer"
+        )
+        for role in ("arbiter_runtime", "arbiter_maintenance"):
+            assert not connection.execute(
+                text(
+                    "SELECT "
+                    "has_function_privilege(:role,'arbiter.retire_requests(uuid,uuid,timestamptz,uuid,integer)','EXECUTE')"
+                ),
+                {"role": role},
+            ).scalar_one()
+        for table in (
+            "requests",
+            "reservations",
+            "accounting_events",
+            "audit_events",
+            "idempotency_tombstones",
+        ):
+            assert not connection.execute(
+                text("SELECT has_table_privilege('arbiter_runtime',:table,'DELETE,TRUNCATE')"),
+                {"table": "arbiter." + table},
+            ).scalar_one()
+        for table in ("quota_windows", "budget_windows"):
+            assert not connection.execute(
+                text(
+                    "SELECT "
+                    "has_table_privilege('arbiter_retention_writer',:table,'INSERT,UPDATE,DELETE,TRUNCATE')"
+                ),
+                {"table": "arbiter." + table},
+            ).scalar_one()
+        assert (
+            connection.execute(
+                text(
+                    "SELECT count(*) FROM pg_auth_members WHERE member=(SELECT oid "
+                    "FROM pg_roles WHERE rolname='arbiter_retention_writer')"
+                )
+            ).scalar_one()
+            == 0
+        )
+        assert connection.execute(
+            text(
+                "SELECT NOT rolcanlogin AND NOT rolbypassrls AND NOT rolsuper "
+                "FROM pg_roles WHERE rolname='arbiter_retention_writer'"
+            )
+        ).scalar_one()
+        for function in ("rate_preflight_live", "reserve_request_live"):
+            signature = (
+                f"arbiter.{function}(uuid,uuid,text,bytea,integer,text,bytea,integer,text,integer)"
+            )
+            assert not connection.execute(
+                text("SELECT has_function_privilege('arbiter_runtime',:function,'EXECUTE')"),
+                {"function": signature},
+            ).scalar_one()
+    migrate_to(disposable_database, "0019_reserved_provider_binding", downgrade=True)
+    migrate_to(disposable_database, "head")
+
+
 def test_maintenance_recovery_migration_restricts_discovery_and_round_trips(
     disposable_database: Engine,
 ) -> None:
@@ -106,7 +185,7 @@ def test_maintenance_recovery_migration_restricts_discovery_and_round_trips(
     with engine.begin() as connection:
         assert connection.execute(
             text("SELECT version_num FROM public.alembic_version")
-        ).scalar_one() == ("0019_reserved_provider_binding")
+        ).scalar_one() == ("0020_request_retention")
         assert connection.execute(
             text("""
                 SELECT c.relrowsecurity AND c.relforcerowsecurity
@@ -216,7 +295,7 @@ def test_dispatch_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0019_reserved_provider_binding"
+                == "0020_request_retention"
             )
             set_context(connection, actor.tenant)
             assert connection.execute(
@@ -301,7 +380,7 @@ def test_terminal_upgrade_preserves_dispatched_request_and_refuses_evidence_loss
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0019_reserved_provider_binding"
+                == "0020_request_retention"
             )
     finally:
         runtime.dispose()
@@ -375,7 +454,7 @@ def test_release_upgrade_preserves_reservation_and_refuses_lossy_downgrade(
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0019_reserved_provider_binding"
+                == "0020_request_retention"
             )
             set_context(connection, actor.tenant)
             assert connection.execute(
@@ -486,7 +565,7 @@ def test_reservation_upgrade_preserves_legacy_evidence_and_blocks_lossy_downgrad
                 connection.execute(
                     text("SELECT version_num FROM public.alembic_version")
                 ).scalar_one()
-                == "0019_reserved_provider_binding"
+                == "0020_request_retention"
             )
     finally:
         runtime.dispose()
@@ -581,13 +660,13 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
     with engine.begin() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one()
-            == "0019_reserved_provider_binding"
+            == "0020_request_retention"
         )
         assert (
             connection.execute(
                 text("SELECT count(*) FROM pg_tables WHERE schemaname='arbiter'")
             ).scalar_one()
-            == 16
+            == 17
         )
         assert (
             connection.execute(
@@ -596,7 +675,7 @@ def test_migration_empty_and_previous_then_repeat_and_round_trip(
             WHERE n.nspname='arbiter' AND c.relrowsecurity AND c.relforcerowsecurity
         """)
             ).scalar_one()
-            == 12
+            == 13
         )
         assert (
             connection.execute(

@@ -14,6 +14,7 @@ RELEASE_ROLE = "arbiter_release_writer"
 DISPATCH_ROLE = "arbiter_dispatch_writer"
 TERMINAL_ROLE = "arbiter_terminal_writer"
 MAINTENANCE_ROLE = "arbiter_maintenance_worker"
+RETENTION_ROLE = "arbiter_retention_writer"
 
 
 def bootstrap(settings: DatabaseSettings) -> None:
@@ -54,6 +55,7 @@ def bootstrap(settings: DatabaseSettings) -> None:
                     DISPATCH_ROLE,
                     TERMINAL_ROLE,
                     MAINTENANCE_ROLE,
+                    RETENTION_ROLE,
                 }
                 if role == "migration"
                 else set()
@@ -251,6 +253,29 @@ def bootstrap(settings: DatabaseSettings) -> None:
         )
         connection.execute(
             "GRANT arbiter_maintenance_worker TO arbiter_migration WITH INHERIT FALSE, SET TRUE"
+        )
+        if (
+            connection.execute(
+                "SELECT 1 FROM pg_roles WHERE rolname=%s", (RETENTION_ROLE,)
+            ).fetchone()
+            is None
+        ):
+            connection.execute("CREATE ROLE arbiter_retention_writer")
+        if (
+            connection.execute(
+                "SELECT 1 FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles "
+                "WHERE rolname=%s)",
+                (RETENTION_ROLE,),
+            ).fetchone()
+            is not None
+        ):
+            raise ValueError("unexpected retention owner membership")
+        connection.execute(
+            "ALTER ROLE arbiter_retention_writer WITH NOLOGIN NOSUPERUSER NOCREATEDB "
+            "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL"
+        )
+        connection.execute(
+            "GRANT arbiter_retention_writer TO arbiter_migration WITH INHERIT FALSE, SET TRUE"
         )
         connection.execute(
             sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(sql.Identifier(settings.name))

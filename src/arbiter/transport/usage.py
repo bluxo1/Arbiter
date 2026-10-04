@@ -18,7 +18,7 @@ from arbiter.operations.usage import (
 )
 from arbiter.persistence.identity import InaccessibleTenant
 from arbiter.persistence.tenant import TenantTransaction
-from arbiter.persistence.usage import RequestStatus, UsageTotals
+from arbiter.persistence.usage import RequestStatus, RetiredRequest, UsageTotals
 from arbiter.persistence.workload import KeyBinding
 from arbiter.transport.errors import error_response
 from arbiter.transport.identity import management_bearer
@@ -98,7 +98,17 @@ def _usage_response(totals: list[UsageTotals]) -> JSONResponse:
     return JSONResponse(result.model_dump(mode="json"), headers={"Cache-Control": "no-store"})
 
 
-def _status_response(status: RequestStatus) -> JSONResponse:
+def _status_response(status: RequestStatus | RetiredRequest) -> JSONResponse:
+    if isinstance(status, RetiredRequest):
+        return JSONResponse(
+            status_code=410,
+            content={
+                "error": {"code": "request_retired", "message": "Request retired"},
+                "request_id": str(status.id),
+                "state": status.state,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
     result = RequestStatusResponse(
         data=PublicRequestStatus(
             id=status.id,
@@ -165,7 +175,7 @@ async def workload_request(request: Request, request_id: str) -> JSONResponse:
     """API key with usage scope; stored request metadata only, no completion replay."""
     identifier = _request_id(request_id)
 
-    def read(binding: KeyBinding, scoped: TenantTransaction) -> RequestStatus:
+    def read(binding: KeyBinding, scoped: TenantTransaction) -> RequestStatus | RetiredRequest:
         del binding
         # Query validation deliberately follows authentication and scope checks.
         _reject_query_params(request)
