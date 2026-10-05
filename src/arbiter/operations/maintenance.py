@@ -14,6 +14,7 @@ from arbiter.governance.release import (
     ReleaseUnavailable,
 )
 from arbiter.identity.context import TenantContext
+from arbiter.observability import observed
 from arbiter.persistence.maintenance import MaintenanceCandidate, candidates
 from arbiter.persistence.tenant import tenant_transaction
 from arbiter.persistence.terminal import TerminalRepository
@@ -63,6 +64,7 @@ class MaintenanceService:
                 self._binding(item), item.request_id, "unknown", "unknown", None, None
             )
 
+    @observed("maintenance")
     def run_once(self) -> MaintenanceResult:
         """Repeat safely; a failed scan or mutation always closes recovery readiness."""
         with self._lock:

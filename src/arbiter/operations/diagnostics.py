@@ -14,6 +14,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from arbiter.config import DatabaseSettings, RedisSettings
+from arbiter.observability import configure_logging
 from arbiter.persistence.tenant import runtime_engine
 
 
@@ -170,6 +171,7 @@ def diagnose() -> FoundationReport:
 
 
 def main() -> None:
+    configure_logging()
     try:
         report = diagnose()
     except Exception:

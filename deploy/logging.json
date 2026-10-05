@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "disable_existing_loggers": true,
+  "formatters": {"safe": {"()": "arbiter.observability.SafeFormatter"}},
+  "handlers": {"safe": {"class": "logging.StreamHandler", "formatter": "safe"}},
+  "root": {"level": "INFO", "handlers": ["safe"]},
+  "loggers": {
+    "uvicorn": {"handlers": [], "propagate": true},
+    "uvicorn.error": {"handlers": [], "propagate": true},
+    "uvicorn.access": {"handlers": [], "propagate": true},
+    "httpx": {"handlers": [], "propagate": true},
+    "httpcore": {"handlers": [], "propagate": true},
+    "sqlalchemy": {"handlers": [], "propagate": true},
+    "alembic": {"handlers": [], "propagate": true},
+    "py.warnings": {"handlers": [], "propagate": true}
+  }
+}

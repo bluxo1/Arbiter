@@ -3,6 +3,7 @@
 import hmac
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from uuid import UUID
 
 from sqlalchemy.engine import Engine
@@ -11,11 +12,13 @@ from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from arbiter.governance.capacity import CapacityLease, CapacityOwnershipError
 from arbiter.governance.fingerprint import Fingerprinter, ReservationInput
 from arbiter.identity.context import TenantContext
+from arbiter.observability import metrics
 from arbiter.persistence.dispatch import DispatchRepository
 from arbiter.persistence.release import ReleaseRepository, ReleaseResult
 from arbiter.persistence.tenant import tenant_transaction
 from arbiter.persistence.terminal import TerminalRepository
 from arbiter.providers.port import (
+    ProviderAmbiguous,
     ProviderDeadline,
     ProviderDefiniteFailure,
     ProviderMalformed,
@@ -27,6 +30,23 @@ from arbiter.providers.port import (
     ProviderResult,
     ProviderUnavailable,
 )
+
+
+def _provider_metric(error: Exception) -> str:
+    """Provider type classification only; never a durable lifecycle decision."""
+    if isinstance(error, (ProviderModelUnavailable, ProviderUnavailable)):
+        return "unavailable"
+    if isinstance(error, ProviderRejectedInput):
+        return "rejected_input"
+    if isinstance(error, ProviderDefiniteFailure):
+        return "definite_failure"
+    if isinstance(error, ProviderDeadline):
+        return "deadline"
+    if isinstance(error, ProviderMalformed):
+        return "invalid_response"
+    if isinstance(error, ProviderAmbiguous):
+        return "unknown"
+    return "failure"
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +212,7 @@ class DispatchService:
         if deadline is None:
             deadline = datetime.now(UTC) + timedelta(seconds=120)
         validation_outcome = "succeeded"
+        validation_metric = "success"
         public_error: str | None = None
         try:
             if deadline <= datetime.now(UTC):
@@ -199,24 +220,30 @@ class DispatchService:
             # Validation is explicitly non-inferencing. A known local mismatch
             # cannot have reached generation and is a definite failed attempt.
             provider.validate(transient)
-        except ProviderDeadline:
+        except ProviderDeadline as error:
+            validation_metric = _provider_metric(error)
             validation_outcome = "unknown"
             public_error = "provider_deadline"
-        except ProviderModelUnavailable:
+        except ProviderModelUnavailable as error:
+            validation_metric = _provider_metric(error)
             validation_outcome = "failed"
             public_error = "model_unavailable"
-        except (ProviderRejectedInput, ProviderDefiniteFailure):
+        except (ProviderRejectedInput, ProviderDefiniteFailure) as error:
+            validation_metric = _provider_metric(error)
             validation_outcome = "failed"
             public_error = "provider_failure"
-        except ProviderUnavailable:
+        except ProviderUnavailable as error:
+            validation_metric = _provider_metric(error)
             # Validation cannot initiate work, but it cannot establish readiness.
             validation_outcome = "failed"
             public_error = "provider_unavailable"
-        except Exception:
+        except Exception as error:
+            validation_metric = _provider_metric(error)
             # An undocumented adapter failure after the dispatch marker is
             # conservatively quarantined; it cannot cause a provider call.
             validation_outcome = "unknown"
             public_error = "provider_outcome_unknown"
+        metrics.record("provider_validation", validation_metric)
         if not lease._claim_provider_once():
             raise DispatchConflict()
         text_value: str | None = None
@@ -230,6 +257,8 @@ class DispatchService:
             state, outcome = "unknown", "unknown"
             public_error = "provider_deadline"
         else:
+            provider_started = monotonic()
+            provider_metric = "success"
             try:
                 # There is no open PostgreSQL transaction during this call.
                 response = _valid_result(
@@ -238,29 +267,41 @@ class DispatchService:
                 state, outcome = "succeeded", "succeeded"
                 text_value = response.assistant_text
                 input_tokens, output_tokens = response.input_tokens, response.output_tokens
-            except ProviderModelUnavailable:
+            except ProviderModelUnavailable as error:
+                provider_metric = _provider_metric(error)
                 state, outcome = "failed", "provider_failure"
                 public_error = "model_unavailable"
-            except ProviderDefiniteFailure:
+            except ProviderDefiniteFailure as error:
+                provider_metric = _provider_metric(error)
                 state, outcome = "failed", "provider_failure"
                 public_error = "provider_failure"
-            except ProviderDeadline:
+            except ProviderDeadline as error:
+                provider_metric = _provider_metric(error)
                 state, outcome = "unknown", "unknown"
                 public_error = "provider_deadline"
-            except ProviderOversizedResponse:
+            except ProviderOversizedResponse as error:
+                provider_metric = _provider_metric(error)
                 state, outcome = "unknown", "unknown"
                 public_error = "provider_oversized"
-            except ProviderMalformed:
+            except ProviderMalformed as error:
+                provider_metric = _provider_metric(error)
                 state, outcome = "unknown", "unknown"
                 public_error = "provider_malformed"
-            except ProviderUnavailable:
+            except ProviderUnavailable as error:
+                provider_metric = _provider_metric(error)
                 state, outcome = "unknown", "unknown"
                 public_error = "provider_unavailable"
-            except Exception:
+            except Exception as error:
+                provider_metric = _provider_metric(error)
                 # Deadline, malformed output and all inconclusive failures stay charged
                 # and quarantined. The exception object/body is never logged or stored.
                 state, outcome = "unknown", "unknown"
                 public_error = "provider_outcome_unknown"
+            metrics.record(
+                "provider",
+                provider_metric,
+                monotonic() - provider_started,
+            )
         if state == "unknown":
             # Close local recovery admission before the unknown terminal commit.
             # A concurrent maintenance scan cannot reopen a quarantined gate.

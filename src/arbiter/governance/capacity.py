@@ -68,6 +68,17 @@ class CapacityGate:
         with self._lock:
             return len(self._owners)
 
+    def operational_snapshot(self) -> dict[str, int | bool]:
+        """Count safety states under the gate lock; never export claim identities."""
+        with self._lock:
+            return {
+                "limit": self.limit,
+                "occupied": len(self._owners),
+                "quarantined": len(self._quarantined),
+                "recovery_ready": self._ready,
+                "saturated": len(self._owners) >= self.limit,
+            }
+
     @property
     def ready(self) -> bool:
         with self._lock:

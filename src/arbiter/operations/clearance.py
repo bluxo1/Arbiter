@@ -1,17 +1,26 @@
 """Local operator clearance after independently confirming provider termination."""
 
-import argparse
+from typing import Never
 from uuid import UUID
 
 from sqlalchemy.exc import SQLAlchemyError
 
 from arbiter.config import DatabaseSettings
+from arbiter.observability import configure_logging
+from arbiter.operations.provision import OperatorParser
 from arbiter.persistence.maintenance import clear_unknown
 from arbiter.persistence.operator import operator_engine
 
 
+class ClearanceParser(OperatorParser):
+    def error(self, message: str) -> Never:
+        # Retain argparse's exit status without echoing rejected operator input.
+        self.exit(2, "operator clearance failed (invalid arguments)\n")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Clear quarantined unknown capacity")
+    configure_logging()
+    parser = ClearanceParser(description="Clear quarantined unknown capacity")
     parser.add_argument("--tenant", type=UUID, required=True)
     parser.add_argument("--request", type=UUID, required=True)
     parser.add_argument(
@@ -21,7 +30,10 @@ def main() -> None:
         help="Attest that Ollama has no running work for this request",
     )
     args = parser.parse_args()
-    engine = operator_engine(DatabaseSettings())
+    try:
+        engine = operator_engine(DatabaseSettings())
+    except Exception:
+        raise SystemExit("operator clearance unavailable") from None
     try:
         changed = clear_unknown(engine, args.tenant, args.request)
     except (SQLAlchemyError, RuntimeError):

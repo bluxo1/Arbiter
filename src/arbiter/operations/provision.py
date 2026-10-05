@@ -14,6 +14,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
 from arbiter.config import DatabaseSettings
+from arbiter.observability import configure_logging
 from arbiter.operations.policy import PolicyInput, PolicyService
 from arbiter.operations.registry import (
     ModelInput,
@@ -154,6 +155,7 @@ class ProvisioningService:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
+    configure_logging()
     parser = OperatorParser(description="Local, separately credentialed Arbiter operator")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("create-tenant")

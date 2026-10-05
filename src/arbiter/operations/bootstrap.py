@@ -297,6 +297,9 @@ def bootstrap(settings: DatabaseSettings) -> None:
 
 
 def main() -> None:
+    from arbiter.observability import configure_logging
+
+    configure_logging()
     try:
         bootstrap(DatabaseSettings())
     except (OSError, ValueError, psycopg.Error) as error:

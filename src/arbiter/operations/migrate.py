@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.pool import NullPool
 
 from arbiter.config import DatabaseSettings
+from arbiter.observability import configure_logging
 
 
 def migrate() -> None:
@@ -25,6 +26,7 @@ def migrate() -> None:
 
 
 def main() -> None:
+    configure_logging()
     try:
         migrate()
     except Exception as error:

@@ -43,6 +43,8 @@ services:
 
   postgres:
     image: postgres:17.11-bookworm@sha256:639ab7ceb90e13123085b741fb31ef493fba25463002f6da665352e7b534b652
+    # SQL/parameter error logging can expose operator values and credential DDL.
+    command: [postgres, -c, log_statement=none, -c, log_min_error_statement=panic, -c, log_parameter_max_length=0, -c, log_parameter_max_length_on_error=0, -c, log_error_verbosity=terse]
     environment:
       POSTGRES_DB: arbiter
       POSTGRES_USER: arbiter_bootstrap

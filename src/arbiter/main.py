@@ -5,8 +5,10 @@ import ssl
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from anyio import create_task_group, sleep, to_thread
-from fastapi import FastAPI
+from anyio import CancelScope, create_task_group, sleep, to_thread
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from sqlalchemy.engine import Engine
 
 from arbiter.config import (
@@ -17,6 +19,7 @@ from arbiter.config import (
     OidcSettings,
     RedisSettings,
 )
+from arbiter.governance.capacity import process_capacity
 from arbiter.governance.execution import GovernedExecutionService
 from arbiter.governance.fingerprint import Fingerprinter
 from arbiter.governance.rate import RateGate
@@ -27,6 +30,7 @@ from arbiter.identity.keys import KeyIssuer, KeyVerifier
 from arbiter.identity.model_cursor import ModelCursor
 from arbiter.identity.oidc import OidcVerifier
 from arbiter.identity.workload import WorkloadAccess
+from arbiter.observability import configure_logging, metrics, metrics_server
 from arbiter.operations.audit import AuditService
 from arbiter.operations.key_listing import KeyListService
 from arbiter.operations.key_revocation import KeyRevocationService
@@ -42,6 +46,7 @@ from arbiter.persistence.maintenance import maintenance_engine
 from arbiter.persistence.tenant import runtime_engine
 from arbiter.transport.audit import router as audit_router
 from arbiter.transport.chat import router as chat_router
+from arbiter.transport.errors import error_response
 from arbiter.transport.health import router as health_router
 from arbiter.transport.keys import router as key_router
 from arbiter.transport.models import router as model_router
@@ -96,6 +101,7 @@ def create_app(
     chat_service: GovernedExecutionService | None = None,
 ) -> FastAPI:
     """Optional explicit service wiring is for host-side tests, never request input."""
+    configure_logging()
 
     async def maintain(service: MaintenanceService) -> None:
         while True:
@@ -169,10 +175,20 @@ def create_app(
                     pass
                 async with create_task_group() as tasks:
                     tasks.start_soon(maintain, maintenance)
+                    exporter = metrics_server(
+                        lambda: {
+                            **metrics.output(),
+                            "capacity": process_capacity.operational_snapshot(),
+                            "public_readiness": "not_ready",
+                        }
+                    )
+                    await to_thread.run_sync(exporter.__enter__)
                     try:
                         yield
                     finally:
                         tasks.cancel_scope.cancel()
+                        with CancelScope(shield=True):
+                            await to_thread.run_sync(lambda: exporter.__exit__(None, None, None))
         finally:
             await to_thread.run_sync(engine.dispose)
             await to_thread.run_sync(discovery.dispose)
@@ -198,6 +214,16 @@ def create_app(
                 del app.state.chat_service
 
     app = FastAPI(debug=False, docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_fields(_: Request, error: RequestValidationError) -> JSONResponse:
+        # FastAPI's default envelope includes rejected input. No caller value is echoed.
+        return error_response(422, "invalid_fields", "Invalid request")
+
+    @app.exception_handler(Exception)
+    async def unexpected_failure(_: Request, error: Exception) -> JSONResponse:
+        return error_response(503, "unavailable", "Service unavailable")
+
     app.include_router(health_router)
     app.include_router(audit_router)
     app.include_router(key_router)

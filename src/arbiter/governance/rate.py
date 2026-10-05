@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 from arbiter.config import RedisSettings
+from arbiter.observability import metrics
 from arbiter.persistence.workload import KeyBinding
 
 WINDOW_MS = 60_000
@@ -181,10 +182,14 @@ class RateGate:
                 sock.settimeout(3)
                 sock.sendall(_command(parts))
                 decision = _integer_reply(sock)
-        except (OSError, ValueError, OverflowError):
+        except (OSError, ValueError, OverflowError, RateUnavailable):
+            metrics.redis("unavailable")
             raise RateUnavailable() from None
         if decision == 1:
+            metrics.redis("healthy")
             return
         if decision in {-1, -2}:
+            metrics.redis("denied")
             raise RateDenied()
+        metrics.redis("barrier" if decision == -3 else "unavailable")
         raise RateUnavailable()

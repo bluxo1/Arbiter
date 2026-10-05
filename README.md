@@ -121,6 +121,10 @@ backup/fresh restore, Redis/API/provider restart and audited operator clearance.
 The focused `scripts/verify-phase3.ps1 -Phase recovery` entry point uses disposable
 databases and the existing real host fault controller; archives stay outside Git.
 
+See [restricted observability/security](docs/Observability.md) for private local
+metrics, operational alert conditions, safe logging and repeatable dependency,
+secret and textual artifact checks. These checks do not replace the release gate.
+
 Run verification in the pinned Python container image:
 
 ```powershell

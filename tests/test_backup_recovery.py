@@ -429,10 +429,10 @@ def test_native_restore_preserves_security_accounting_and_recovery(
                 "ORDER BY relname"
             ).fetchall()
         assert scoped_tables
-        for (table,) in scoped_tables:
+        for (scoped_table,) in scoped_tables:
             scoped_statement = text(
                 sql.SQL("SELECT count(tenant_id) FROM {} WHERE tenant_id<>:tenant")
-                .format(sql.Identifier("arbiter", str(table)))
+                .format(sql.Identifier("arbiter", str(scoped_table)))
                 .as_string()
             )
             with tenant_transaction(restored.runtime, TenantContext(unknown.tenant)) as tx:

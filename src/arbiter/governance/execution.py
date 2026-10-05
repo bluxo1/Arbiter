@@ -21,6 +21,7 @@ from arbiter.governance.rate import RateGate
 from arbiter.governance.release import ReleaseConflict, ReleaseService
 from arbiter.identity.context import TenantContext
 from arbiter.identity.keys import KeyVerifier
+from arbiter.observability import observed
 from arbiter.persistence.provider_binding import (
     PinnedModelIdentity,
     ProviderBindingUnavailable,
@@ -108,6 +109,7 @@ class GovernedExecutionService:
             raise ProviderBindingUnavailable()
         return provider
 
+    @observed("execution")
     def execute(
         self, credential: SecretStr, idempotency: str, request: ReservationInput
     ) -> ProviderCompletion:

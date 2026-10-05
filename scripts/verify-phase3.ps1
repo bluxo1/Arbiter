@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('matrix', 'boundary', 'p33', 'related', 'migrations', 'full', 'restart', 'recovery', 'checks')][string]$Phase = 'matrix',
+    [ValidateSet('matrix', 'boundary', 'p33', 'related', 'migrations', 'full', 'restart', 'recovery', 'observability', 'checks')][string]$Phase = 'matrix',
     [ValidateSet('', 'tests/test_usage_transport.py::test_management_current_and_historical_usage')][string]$Deselect = '',
     [string]$DataRoot = 'D:\AI & ML\ArbiterData\phase3\exit-matrix-20260930\ArbiterData'
 )
@@ -28,6 +28,7 @@ $arguments = @('run', '-d', '--name', $name, '--network', 'arbiter-p34_control',
     '--mount', "type=bind,source=$repository\tests,target=/app/tests,readonly",
     '--mount', "type=bind,source=$repository\migrations,target=/app/migrations,readonly",
     '--mount', "type=bind,source=$repository\scripts,target=/app/scripts,readonly",
+    '--mount', "type=bind,source=$repository\deploy,target=/app/deploy,readonly",
     '--mount', "type=bind,source=$evidence,target=/evidence",
     '-e', 'ARBITER_DB_HOST=postgres', '-e', 'ARBITER_REDIS_HOST=redis',
     '-e', 'ARBITER_TEST_DATABASE=1', '-e', 'ARBITER_TEST_MIGRATIONS=1',
@@ -85,6 +86,13 @@ if ($Phase -eq 'checks') {
             'tests/test_phase3_exit_faults.py::test_real_redis_outage_rejects_100_simultaneous_attempts_without_provider_calls',
             'tests/test_phase3_exit_faults.py::test_entire_redis_recovery_barrier_blocks_full_pipeline[restart]',
             'tests/test_phase3_exit_crashes.py::test_process_crash_and_restart_at_every_durable_boundary[during_provider]')
+    } elseif ($Phase -eq 'observability') {
+        $arguments += @('tests/test_observability.py', 'tests/test_observability_integration.py', 'tests/test_security_checks.py',
+            'tests/test_foundation.py', 'tests/test_diagnostics.py', 'tests/test_chat_transport.py',
+            'tests/test_ollama_provider.py', 'tests/test_operator_validation.py',
+            'tests/test_rate_admission.py', 'tests/test_capacity.py', 'tests/test_maintenance.py',
+            'tests/test_phase3_exit_matrix.py::test_generation_calls_are_confined_to_dispatch_service',
+            'tests/test_phase3_exit_matrix.py::test_only_governed_chat_and_existing_http_routes_exist')
     } elseif ($Phase -eq 'related') {
         $arguments += @('tests/test_governed_execution.py', 'tests/test_rate_admission.py',
             'tests/test_rate_governance.py', 'tests/test_reservation_transactions.py',

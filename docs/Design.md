@@ -149,6 +149,30 @@ Maintenance runs every 10 seconds. It releases reservations older than 30 second
 
 Redis uses AOF persistence, a no-eviction policy, and a readiness epoch keyed to its process incarnation. On Redis restart, missing limiter sentinel, or detected state reset, block new inference for a full 60 seconds before initializing a new epoch. Reject during the barrier; serialize initialization in Redis so simultaneous probes cannot shorten it. Restrict administrative Redis commands, and treat unexpected key loss as an enforcement incident. Redis exhaustion or script failure returns 503.
 
+## Operational observability
+
+Production Python logs serialize only fixed event/component/level classes and an
+exception-presence flag. Message text, arguments, extras, headers, raw errors,
+stack/traceback text, credentials and request/provider content are not emitted.
+Access logging remains disabled. Framework validation errors do not echo rejected
+input. PostgreSQL suppresses routine statements, parameter values and error SQL
+below PANIC severity, with terse native error output; SQL must not embed secrets
+or request/provider content.
+
+Content-free process metrics are available only to the local operator through a
+same-UID Unix socket in a private directory, not a public HTTP endpoint. Counters
+use fixed operation/outcome enums; durations are numeric and capacity export
+contains counts/readiness only. No tenant/key/request/correlation/model identifiers,
+caller values, paths, error strings or content are labels. Metrics are observations,
+never accounting/admission authority; counters reset on process incarnation and
+last observations do not certify current dependency availability. Public health
+remains minimal and fail-closed. Operators combine local metrics, dependency health
+and privileged-command/verification exit status using the operational runbook.
+
+No external alert vendor, background cleanup or telemetry persistence is required
+in v0.1. Dependency/secret scans and textual artifact leakage checks fail closed;
+protected PostgreSQL backups are intentionally sensitive data, not public logs.
+
 ## Provider contract
 
 The provider port exposes three operations: report capabilities/health, validate a normalized request against registered caps, and perform one non-streaming generation with an absolute deadline. Its request carries only an approved model reference, messages, output cap, and opaque request correlation. Its response carries assistant text, optional input/output token counts, finish reason, and safe provider metadata. Normalized errors distinguish unavailable, rejected input, deadline, malformed response, and unknown outcome. Adapter validation must not initiate inference.

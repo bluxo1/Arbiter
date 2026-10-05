@@ -4,6 +4,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from threading import Barrier
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -26,11 +27,23 @@ from arbiter.governance.dispatch import DispatchConflict, DispatchService, Termi
 from arbiter.governance.fingerprint import ReservationInput
 from arbiter.governance.release import ReleaseService
 from arbiter.identity.context import TenantContext
+from arbiter.observability import OperationalMetrics
 from arbiter.persistence.tenant import tenant_transaction
 from arbiter.persistence.terminal import TerminalRepository
 from arbiter.persistence.workload import KeyBinding
 from arbiter.providers.double import DeterministicProvider, DoubleMode
-from arbiter.providers.port import ProviderRequest, ProviderResult
+from arbiter.providers.port import (
+    ProviderAmbiguous,
+    ProviderDeadline,
+    ProviderDefiniteFailure,
+    ProviderMalformed,
+    ProviderModelUnavailable,
+    ProviderOversizedResponse,
+    ProviderRejectedInput,
+    ProviderRequest,
+    ProviderResult,
+    ProviderUnavailable,
+)
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("ARBITER_TEST_DATABASE") != "1", reason="requires real PostgreSQL"
@@ -52,6 +65,69 @@ def prepared(
 
 def double(store: ReservationStore, mode: DoubleMode = "success") -> DeterministicProvider:
     return DeterministicProvider(store.model, DIGEST, 256, mode=mode)
+
+
+@pytest.mark.parametrize("phase", ["validation", "generation"])
+@pytest.mark.parametrize(
+    "error_type,category",
+    [
+        (ProviderModelUnavailable, "unavailable"),
+        (ProviderUnavailable, "unavailable"),
+        (ProviderRejectedInput, "rejected_input"),
+        (ProviderDefiniteFailure, "definite_failure"),
+        (ProviderDeadline, "deadline"),
+        (ProviderMalformed, "invalid_response"),
+        (ProviderOversizedResponse, "invalid_response"),
+        (ProviderAmbiguous, "unknown"),
+        (RuntimeError, "failure"),
+    ],
+)
+def test_provider_metrics_classify_types_without_changing_lifecycle(
+    store: ReservationStore,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    error_type: type[Exception],
+    category: str,
+) -> None:
+    actor, gate, lease, original = prepared(store)
+    observed = OperationalMetrics()
+    monkeypatch.setattr("arbiter.governance.dispatch.metrics", observed)
+
+    class FailingProvider(ScriptedProvider):
+        def validate(self, request: ProviderRequest) -> None:
+            super().validate(request)
+            if phase == "validation":
+                raise error_type()
+
+        def generate(self, request: ProviderRequest, deadline: datetime) -> ProviderResult:
+            super().generate(request, deadline)
+            raise error_type()
+
+    provider = FailingProvider(store.model, DIGEST, 256, "success")
+    completed = DispatchService(store.runtime).run_double_once(
+        lease, original, provider, store.fingerprint
+    )
+    definite = issubclass(error_type, ProviderDefiniteFailure) or (
+        phase == "validation" and error_type is ProviderUnavailable
+    )
+    expected_state = "failed" if definite else "unknown"
+    assert completed.state == expected_state
+    assert completed.outcome == ("provider_failure" if definite else "unknown")
+    assert len(provider.calls) == (0 if phase == "validation" else 1)
+    assert row(store, actor, lease.result.request_id)[0:2] == (completed.state, completed.outcome)
+    assert store.totals(actor) == (1, 0, 10, 0)
+    assert gate.occupied == (0 if definite else 1)
+    assert gate.operational_snapshot()["quarantined"] == (0 if definite else 1)
+    expected = (
+        {("provider_validation", category): 1}
+        if phase == "validation"
+        else {("provider_validation", "success"): 1, ("provider", category): 1}
+    )
+    assert {
+        (entry["operation"], entry["outcome"]): entry["count"]
+        for entry in cast(list[dict[str, object]], observed.output()["operations"])
+        if entry["count"]
+    } == expected
 
 
 def row(store: ReservationStore, actor: Actor, request_id: UUID) -> tuple[object, ...]:
