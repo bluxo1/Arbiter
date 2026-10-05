@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('matrix', 'boundary', 'p33', 'related', 'migrations', 'full', 'restart', 'checks')][string]$Phase = 'matrix',
+    [ValidateSet('matrix', 'boundary', 'p33', 'related', 'migrations', 'full', 'restart', 'recovery', 'checks')][string]$Phase = 'matrix',
     [ValidateSet('', 'tests/test_usage_transport.py::test_management_current_and_historical_usage')][string]$Deselect = '',
     [string]$DataRoot = 'D:\AI & ML\ArbiterData\phase3\exit-matrix-20260930\ArbiterData'
 )
@@ -80,6 +80,11 @@ if ($Phase -eq 'checks') {
         $arguments += @('tests/test_migrations.py')
     } elseif ($Phase -eq 'restart') {
         $arguments += @('tests/test_rate_governance.py::test_process_restart_requires_new_full_barrier')
+    } elseif ($Phase -eq 'recovery') {
+        $arguments += @('tests/test_backup_recovery.py',
+            'tests/test_phase3_exit_faults.py::test_real_redis_outage_rejects_100_simultaneous_attempts_without_provider_calls',
+            'tests/test_phase3_exit_faults.py::test_entire_redis_recovery_barrier_blocks_full_pipeline[restart]',
+            'tests/test_phase3_exit_crashes.py::test_process_crash_and_restart_at_every_durable_boundary[during_provider]')
     } elseif ($Phase -eq 'related') {
         $arguments += @('tests/test_governed_execution.py', 'tests/test_rate_admission.py',
             'tests/test_rate_governance.py', 'tests/test_reservation_transactions.py',
@@ -104,6 +109,32 @@ try {
             $requestUtc = $file.LastWriteTimeUtc
             $request = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
             $operation = [string]$request.operation
+            if ($Phase -in @('recovery', 'full') -and $operation -eq 'backup_restore') {
+                $source = [string]$request.source
+                $restore = [string]$request.restore
+                if ($source -cnotmatch '^arbiter_migration_test_[a-f0-9]{32}$' -or
+                    $restore -cnotmatch '^arbiter_restore_[a-f0-9]{32}$') {
+                    throw 'Unexpected disposable backup/restore database.'
+                }
+                $archiveDirectory = Join-Path $evidence 'protected-backups'
+                try {
+                    $backup = & (Join-Path $PSScriptRoot 'backup-restore.ps1') -Operation backup `
+                        -PostgresContainer arbiter-p34-postgres-1 -Database $source -ArchiveDirectory $archiveDirectory
+                    $null = & (Join-Path $PSScriptRoot 'backup-restore.ps1') -Operation restore `
+                        -PostgresContainer arbiter-p34-postgres-1 -Database $source -ArchiveDirectory $archiveDirectory `
+                        -Archive $backup.archive -RestoreDatabase $restore
+                    $response = @{ complete = $true }
+                    [System.IO.File]::WriteAllText((Join-Path $evidence 'backup.json'), ($backup | ConvertTo-Json -Compress))
+                } catch {
+                    $faultFailed = $true
+                    $response = @{ complete = $false; error = 'backup_restore_failed' }
+                }
+                $reply = Join-Path $control ($file.Name.Replace('.request.json', '.reply.json'))
+                [System.IO.File]::WriteAllText("$reply.tmp", ($response | ConvertTo-Json -Compress))
+                Move-Item -LiteralPath "$reply.tmp" -Destination $reply
+                $handled[$file.Name] = $true
+                continue
+            }
             if ($operation -notin @('redis_stop', 'redis_start', 'redis_restart', 'postgres_stop', 'postgres_start')) {
                 throw 'Unrecognized disposable-stack fault operation.'
             }

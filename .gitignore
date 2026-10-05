@@ -15,4 +15,4 @@ secrets/
 *.key
 *.p12
 *.pfx
-
+*.dump

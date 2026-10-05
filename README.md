@@ -116,6 +116,11 @@ directories. The separately provisioned Keycloak issuer is outside this stack.
 Startup never pulls a model; the existing approved model cache is reused. Ollama
 health checks establish metadata availability only, not model readiness.
 
+See [the recovery runbook](docs/Recovery.md) for startup/stop, native PostgreSQL
+backup/fresh restore, Redis/API/provider restart and audited operator clearance.
+The focused `scripts/verify-phase3.ps1 -Phase recovery` entry point uses disposable
+databases and the existing real host fault controller; archives stay outside Git.
+
 Run verification in the pinned Python container image:
 
 ```powershell
