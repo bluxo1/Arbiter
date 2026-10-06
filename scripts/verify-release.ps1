@@ -95,6 +95,16 @@ function Protect-Evidence([string]$Directory) {
     }
 }
 
+function Assert-FaultStackIdentity([string[]]$Output, [string]$ExpectedProject) {
+    # Fault-stack identity comes from the Compose project label, never from the container name alone.
+    if ($Output.Count -ne 1) { throw 'Fault-stack label evidence is missing or duplicated.' }
+    try { $labels = $Output[0] | ConvertFrom-Json } catch { throw 'Fault-stack label evidence is not valid JSON.' }
+    if ($labels -isnot [pscustomobject]) { throw 'Fault-stack label evidence is not a label map.' }
+    $project = $labels.'com.docker.compose.project'
+    if ([string]::IsNullOrEmpty($project)) { throw 'Compose project label missing.' }
+    if ($project -cne $ExpectedProject) { throw 'Existing disposable fault stack required.' }
+}
+
 function Assert-NoOtherVerifier {
     $active = @(Invoke-Required 'exclusive verifier container check' 'docker' @('ps', '--format', '{{.Image}} {{.Names}}'))
     if (@($active | Where-Object { $_ -match '^arbiter-local:p3-4-verification\s' }).Count) { throw 'A verification container is already running.' }
@@ -472,8 +482,8 @@ try {
     Assert-NoOtherVerifier
     # Cheap checks reuse the existing disposable fault stack; never stop another stack.
     foreach ($service in @('postgres', 'redis')) {
-        $label = @(Invoke-Required 'fault target identity' 'docker' @('inspect', '--format', '{{index .Config.Labels "com.docker.compose.project"}}', "arbiter-p34-$service-1"))
-        if ($label.Count -ne 1 -or $label[0] -cne 'arbiter-p34') { throw 'Existing disposable fault stack required.' }
+        $labels = @(Invoke-Required 'fault target identity' 'docker' @('inspect', '--format', '{{json .Config.Labels}}', "arbiter-p34-$service-1"))
+        Assert-FaultStackIdentity $labels 'arbiter-p34'
         Invoke-Required 'restore disposable dependency' 'docker' @('start', "arbiter-p34-$service-1") | Out-Null
         Wait-Healthy "arbiter-p34-$service-1"
     }

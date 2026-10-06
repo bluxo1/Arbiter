@@ -5,7 +5,7 @@ $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile(
     (Join-Path $repository 'scripts/verify-release.ps1'), [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw 'Release coordinator syntax failed.' }
-foreach ($name in @('Read-ReleaseJUnit', 'Assert-ReleaseGit', 'Invoke-Required', 'Invoke-Phase', 'Copy-TextEvidence', 'Export-ReleaseProbes', 'Protect-Evidence')) {
+foreach ($name in @('Read-ReleaseJUnit', 'Assert-ReleaseGit', 'Invoke-Required', 'Invoke-Phase', 'Copy-TextEvidence', 'Export-ReleaseProbes', 'Protect-Evidence', 'Assert-FaultStackIdentity')) {
     $node = $ast.Find({ param($item)
         $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $name
     }, $true)
@@ -135,6 +135,40 @@ try {
     }
     Reject { Invoke-IcaclsFailClosed @((Join-Path $temporary 'protect-malformed'), '/inheritance:r', '/grant:r',
         ('*' + $sid + ':(OI)(CI)F'), '/grant:r', '*S-1-5-18:(OI)(CI)F', '/grant:r', '*:(OI)(CI)F') }
+
+    # Fault-stack identity: labels JSON parsed in PowerShell; no quoted map key reaches native parsing.
+    Assert-Proof ($ast.Extent.Text -notmatch '\{\{index')
+    $validLabels = '{"com.docker.compose.project":"arbiter-p34","com.docker.compose.service":"postgres"}'
+    Assert-FaultStackIdentity @($validLabels) 'arbiter-p34'
+    Reject { Assert-FaultStackIdentity @('{"com.docker.compose.service":"postgres"}') 'arbiter-p34' }
+    Reject { Assert-FaultStackIdentity @('{"com.docker.compose.project":"arbiter-p0"}') 'arbiter-p34' }
+    Reject { Assert-FaultStackIdentity @('{"com.docker.compose.project":') 'arbiter-p34' }
+    Reject { Assert-FaultStackIdentity @() 'arbiter-p34' }
+    Reject { Assert-FaultStackIdentity @($validLabels, $validLabels) 'arbiter-p34' }
+    Reject { Assert-FaultStackIdentity @('[]') 'arbiter-p34' }
+    Reject { Assert-FaultStackIdentity @('{"com.docker.compose.project":""}') 'arbiter-p34' }
+    # Real host probe: only containers that actually exist; identity comes from the project label.
+    # Resolve 'docker' by name like the coordinator does; skip when the engine is not reachable.
+    if (Get-Command 'docker' -ErrorAction SilentlyContinue) {
+        $previousPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $global:LASTEXITCODE = $null
+            $null = & docker version '--format' '{{.Server.Version}}' 2>$null
+            $engineAvailable = ($LASTEXITCODE -eq 0)
+        } catch { $engineAvailable = $false }
+        try {
+            if ($engineAvailable) {
+                $names = @(& docker 'ps' '-a' '--format' '{{.Names}}' 2>$null)
+                foreach ($candidate in @('arbiter-p34-postgres-1', 'arbiter-p34-redis-1')) {
+                    if ($names -ccontains $candidate) {
+                        $labelEvidence = @(& docker 'inspect' '--format' '{{json .Config.Labels}}' $candidate 2>$null)
+                        Assert-FaultStackIdentity $labelEvidence 'arbiter-p34'
+                    }
+                }
+            }
+        } finally { $ErrorActionPreference = $previousPreference }
+    }
 
     # Scoped native-command double: no actual Git mutations or Docker calls.
     function Invoke-Required([string]$Label, [string]$Command, [string[]]$Arguments) {
