@@ -517,3 +517,78 @@ PostgreSQL consumption and in-flight records now exist. The local policy path
 must retain its locked consumption/occupancy checks when changing live limits.
 The Redis limiter is an internal admission component; no provider call or
 public inference is enabled.
+
+## Host release verification
+
+Run the release coordinator from **normal host Windows PowerShell** with working
+Docker Desktop Linux-engine access, from the repository root:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release.ps1
+```
+
+The default requires clean `main`, an empty index, and `main == origin/main`.
+To review only the uncommitted coordinator/docs before their checkpoint, use:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release.ps1 -AllowReleaseToolingChanges
+```
+
+That switch permits only unstaged `README.md`, `docs/Memory.md`,
+`scripts/verify-release.ps1`, and `tests/test_verify_release.ps1`; it never permits
+runtime, migration, or Python-test changes. Candidate revision and tooling hashes
+are recorded and checked again. The execution-policy option applies only to this
+process; it does not change machine policy.
+
+Prerequisites are the existing disposable `arbiter-p34` PostgreSQL/Redis stack and
+its protected secrets, the documented identity network/CA, working GPU-enabled
+Compose, and the **already installed** model pinned by
+`tests/phase4_exit_real_ollama.py`. No model is pulled or substituted. Default
+model cache: `D:\AI & ML\ArbiterData\ollama\models`. Run no other fault/recovery
+controller concurrently. A stack-scoped exclusive release lock and active
+container/process checks reject overlapping coordinators or detected controllers;
+they cannot fence arbitrary Docker commands started manually outside this tool.
+
+The command builds current verification/runtime images; runs static, syntax,
+Compose and security preflight (OSV, pinned Trivy and mandatory positive control);
+then starts a clean isolated `arbiter-release` Compose project with fresh unique
+PostgreSQL/Redis storage. It preserves the existing model cache, old data volumes,
+and failure evidence. It checks healthy services, migrations, foundation
+diagnostics and the private metrics socket. Public readiness deliberately remains
+HTTP 503 under the existing contract; connectivity does not authorize inference.
+
+Only after preflight/startup pass does it invoke the canonical **full suite once**,
+with the real PostgreSQL/migration/Redis/host-fault gates. Zero failures, errors and
+skips are required. The default allows no deselection. If the documented historical
+usage fixture requires the committed exception, explicitly add
+`-DeselectKnownUsageFixture`; only
+`tests/test_usage_transport.py::test_management_current_and_historical_usage`
+is then deselected and its count is reported. No other exclusion is supported.
+
+Subsequent stages reuse the real pinned Ollama proof, same-cluster template0
+backup/restore and Redis/process/operator recovery proofs, restart barrier and
+observability suite. JUnit is inspected for nonempty execution, exact totals,
+required groups and zero skips. Child failures stop the gate with their exit code;
+no suite is automatically retried. Existing canonical child scripts may themselves
+normalize a failed container's exit to their PowerShell failure exit.
+
+A bounded test-only observer records model UUID/digest/revision, runtime/hardware,
+three real-request latency samples and capacity-2 saturation with a controlled
+provider-boundary hold. It uses the real governed ASGI route and disposable
+database, not a claim about network throughput or statistically reliable p95.
+It stores no assistant output or credentials. Final textual logs/reports are
+copied into a fail-closed artifact scan; protected backup archives remain separate.
+
+Evidence is outside Git under the existing Phase 3 data root's `tmp\release-*`,
+with a private Windows ACL. `summary.json`, per-stage logs and JUnit counts retain
+the result and timings. Fresh application storage is under
+`D:\AI & ML\ArbiterData\phase5\release-*\ArbiterData`. Services/evidence remain
+for inspection; the coordinator does not delete volumes, commit, tag, or declare
+v0.1 complete. Review the exit evidence against `docs/Phases.md` and the limitations
+in `docs/Recovery.md` and `docs/Observability.md` before release.
+
+Non-Docker coordinator controls can be run independently:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\test_verify_release.ps1
+```
