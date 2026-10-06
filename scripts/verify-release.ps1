@@ -199,6 +199,46 @@ function Wait-Healthy([string]$Container) {
     throw 'Bounded clean-start health wait expired.'
 }
 
+function Assert-ReleaseOverride([string]$Path, [string]$EvidenceSource) {
+    # The release-only override must mount the protected evidence directory read-only at /run/release, and nothing else.
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw 'Release override is missing.' }
+    $yaml = [IO.File]::ReadAllText($Path)
+    $parts = @($yaml -split "(?m)^services:`n", 2)
+    if ($parts.Count -ne 2) { throw 'Release override lacks the api service override.' }
+    $expected = "      - type: bind`n" +
+        "        source: '$($EvidenceSource.Replace("'", "''"))'`n" +
+        "        target: /run/release`n" +
+        "        read_only: true`n" +
+        "        bind: {create_host_path: false}`n"
+    if (-not $parts[1].Contains($expected)) { throw 'Release override evidence mount is malformed or writable.' }
+    if (@([regex]::Matches($parts[1], '(?m)^      - ')).Count -ne 1) { throw 'Release override grants unexpected API mounts.' }
+}
+
+function New-ReleaseOverride([string]$Path, [string]$Run, [string]$ModelDevice, [string]$EvidenceSource) {
+    # Unique bind-volume names avoid accidentally reusing a previous run's database.
+    if ($Run -cnotmatch '^release-\d{8}-\d{6}-[0-9a-f]{8}$') { throw 'Release override requires a scoped run name.' }
+    if (-not $ModelDevice -or -not $EvidenceSource) { throw 'Release override requires the model device and evidence source.' }
+    if ($EvidenceSource -cmatch '["\r\n]') { throw 'Release override evidence source is not a safe YAML scalar.' }
+    # Single-quoted YAML scalars escape embedded single quotes by doubling them.
+    $deviceYaml = "'$($ModelDevice.Replace("'", "''"))'"
+    $evidenceYaml = "'$($EvidenceSource.Replace("'", "''"))'"
+    $yaml = "volumes:`n" +
+        "  postgres_data:`n    name: 'arbiter-$Run-postgres'`n" +
+        "  redis_data:`n    name: 'arbiter-$Run-redis'`n" +
+        "  ollama_models:`n    name: 'arbiter-$Run-models'`n" +
+        "    driver_opts:`n      device: $deviceYaml`n" +
+        "services:`n" +
+        "  api:`n" +
+        "    volumes:`n" +
+        "      - type: bind`n" +
+        "        source: $evidenceYaml`n" +
+        "        target: /run/release`n" +
+        "        read_only: true`n" +
+        "        bind: {create_host_path: false}`n"
+    Set-Content -LiteralPath $Path -Value $yaml -Encoding UTF8 -ErrorAction Stop
+    Assert-ReleaseOverride $Path $EvidenceSource
+}
+
 function Invoke-RealProof([string]$Name, [string[]]$Targets, [string[]]$Required, [string]$ProviderNetwork) {
     Assert-NoOtherVerifier
     $container = "arbiter-release-$Name-" + [Guid]::NewGuid().ToString('N').Substring(0, 12)
@@ -522,9 +562,7 @@ try {
     $env:ARBITER_API_PORT = '18080'
     $modelLinux = '/run/desktop/mnt/host/' + $models.Substring(0, 1).ToLowerInvariant() + '/' + $models.Substring(3).Replace('\', '/')
     $override = Join-Path $directory 'compose.release.yaml'
-    # Unique bind-volume names avoid accidentally reusing a previous run's database.
-    "volumes:`n  postgres_data:`n    name: 'arbiter-$run-postgres'`n  redis_data:`n    name: 'arbiter-$run-redis'`n  ollama_models:`n    name: 'arbiter-$run-models'`n    driver_opts:`n      device: '$($modelLinux.Replace("'", "''"))'" |
-        Set-Content -LiteralPath $override -Encoding UTF8
+    New-ReleaseOverride $override $run $modelLinux $directory
     $compose = @('compose', '-p', 'arbiter-release', '-f', (Join-Path $repository 'compose.yaml'), '-f', $override)
     Invoke-Required 'release Compose config' 'docker' ($compose + @('--profile', 'operations', 'config', '--quiet')) | Out-Null
     Invoke-Required 'clean release service stop (volumes preserved)' 'docker' ($compose + @('down', '--timeout', '30')) | Out-Null
@@ -558,11 +596,13 @@ with urllib.request.urlopen('http://ollama:11434/api/tags', timeout=10) as respo
 assert any(m.get('name') == name and 'sha256:' + m.get('digest', '').removeprefix('sha256:') == digest for m in models), 'approved installed model missing; operator action required, no pull'
 print(json.dumps({'native_name': name, 'digest': digest}, sort_keys=True))
 '@
-    Invoke-Required 'copy public pinned proof metadata' 'docker' @('cp', 'tests/phase4_exit_real_ollama.py', 'arbiter-release-api-1:/tmp/phase4-proof.py') | Out-Null
-    $inventory.Replace('/app/tests/phase4_exit_real_ollama.py', '/tmp/phase4-proof.py') |
+    # Probes stage on the host inside the protected evidence directory and are read by the API
+    # container through the read-only /run/release bind mount; no docker cp into the read-only
+    # runtime rootfs, and the container never gains write access to the evidence directory.
+    Copy-Item -LiteralPath (Join-Path $repository 'tests/phase4_exit_real_ollama.py') -Destination (Join-Path $directory 'phase4-proof.py') -ErrorAction Stop
+    $inventory.Replace('/app/tests/phase4_exit_real_ollama.py', '/run/release/phase4-proof.py') |
         Set-Content -LiteralPath (Join-Path $directory 'model-prerequisite.py') -Encoding UTF8
-    Invoke-Required 'copy availability probe' 'docker' @('cp', (Join-Path $directory 'model-prerequisite.py'), 'arbiter-release-api-1:/tmp/model-prerequisite.py') | Out-Null
-    $modelEvidence = @(Invoke-Required 'exact provider prerequisite' 'docker' @('exec', 'arbiter-release-api-1', 'python', '/tmp/model-prerequisite.py'))
+    $modelEvidence = @(Invoke-Required 'exact provider prerequisite' 'docker' @('exec', 'arbiter-release-api-1', 'python', '/run/release/model-prerequisite.py'))
     $modelEvidence | Set-Content -LiteralPath (Join-Path $directory 'model.json') -Encoding UTF8
     $metrics = @'
 import json
@@ -573,8 +613,7 @@ assert report['capacity']['occupied'] == 0
 print(json.dumps(report, sort_keys=True))
 '@
     $metrics | Set-Content -LiteralPath (Join-Path $directory 'readiness-probe.py') -Encoding UTF8
-    Invoke-Required 'copy private metrics probe' 'docker' @('cp', (Join-Path $directory 'readiness-probe.py'), 'arbiter-release-api-1:/tmp/readiness-probe.py') | Out-Null
-    Invoke-Required 'private readiness metrics' 'docker' @('exec', 'arbiter-release-api-1', 'python', '/tmp/readiness-probe.py') | Out-Null
+    Invoke-Required 'private readiness metrics' 'docker' @('exec', 'arbiter-release-api-1', 'python', '/run/release/readiness-probe.py') | Out-Null
 
     $metadataSource = @'
 import json

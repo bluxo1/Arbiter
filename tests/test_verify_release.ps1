@@ -5,7 +5,7 @@ $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile(
     (Join-Path $repository 'scripts/verify-release.ps1'), [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw 'Release coordinator syntax failed.' }
-foreach ($name in @('Read-ReleaseJUnit', 'Assert-ReleaseGit', 'Invoke-Required', 'Invoke-Phase', 'Copy-TextEvidence', 'Export-ReleaseProbes', 'Protect-Evidence', 'Assert-FaultStackIdentity')) {
+foreach ($name in @('Read-ReleaseJUnit', 'Assert-ReleaseGit', 'Invoke-Required', 'Invoke-Phase', 'Copy-TextEvidence', 'Export-ReleaseProbes', 'Protect-Evidence', 'Assert-FaultStackIdentity', 'New-ReleaseOverride', 'Assert-ReleaseOverride')) {
     $node = $ast.Find({ param($item)
         $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $name
     }, $true)
@@ -210,13 +210,73 @@ try {
     Copy-TextEvidence $source $target
     Assert-Proof ($script:artifactOrdinal -eq 1 -and (Get-Content -LiteralPath (Join-Path $target '1.log')) -eq 'safe')
     Reject { Copy-TextEvidence (Join-Path $source 'nonexistent') $target }
+
+    # Read-only probe staging: probes stage on the host; the runtime container reads them read-only.
+    Assert-Proof ($ast.Extent.Text -notmatch "'cp',")
+    Assert-Proof ($ast.Extent.Text -notmatch 'arbiter-release-api-1:/')
+    Assert-Proof ($ast.Extent.Text -notmatch '/tmp/(phase4-proof|model-prerequisite|readiness-probe)')
+    Assert-Proof ($ast.Extent.Text -cmatch [regex]::Escape("Replace('/app/tests/phase4_exit_real_ollama.py', '/run/release/phase4-proof.py')"))
+    Assert-Proof ($ast.Extent.Text -cmatch [regex]::Escape("'exec', 'arbiter-release-api-1', 'python', '/run/release/model-prerequisite.py'"))
+    Assert-Proof ($ast.Extent.Text -cmatch [regex]::Escape("'exec', 'arbiter-release-api-1', 'python', '/run/release/readiness-probe.py'"))
+    # The generated release-only override mounts the current per-run evidence directory read-only.
+    $overrideCalls = @($ast.FindAll({ param($item)
+        $item -is [Management.Automation.Language.CommandAst] -and
+        $item.CommandElements.Count -eq 5 -and $item.CommandElements[0].Extent.Text -ceq 'New-ReleaseOverride'
+    }, $true))
+    Assert-Proof ($overrideCalls.Count -eq 1)
+    Assert-Proof ($overrideCalls[0].CommandElements[1].Extent.Text -ceq '$override')
+    Assert-Proof ($overrideCalls[0].CommandElements[2].Extent.Text -ceq '$run')
+    Assert-Proof ($overrideCalls[0].CommandElements[3].Extent.Text -ceq '$modelLinux')
+    Assert-Proof ($overrideCalls[0].CommandElements[4].Extent.Text -ceq '$directory')
+    $overrideTest = Join-Path $temporary 'override-test'
+    New-Item -ItemType Directory -Path $overrideTest | Out-Null
+    $overridePath = Join-Path $overrideTest 'compose.release.yaml'
+    $runName = 'release-20261007-120000-abcd1234'
+    New-ReleaseOverride $overridePath $runName '/models/on/host' 'D:\AI & ML\evidence'
+    $overrideYaml = [IO.File]::ReadAllText($overridePath)
+    $apiBlock = (@($overrideYaml -split "(?m)^services:`n", 2))[1]
+    Assert-Proof ($apiBlock.Contains("      - type: bind`n        source: 'D:\AI & ML\evidence'`n        target: /run/release`n        read_only: true`n        bind: {create_host_path: false}`n"))
+    Assert-Proof (@([regex]::Matches($apiBlock, '(?m)^      - ')).Count -eq 1)
+    Assert-Proof ($overrideYaml.Contains("name: 'arbiter-$runName-postgres'`n"))
+    New-ReleaseOverride $overridePath $runName "models'device" 'D:\path with '' quote'
+    $overrideYaml = [IO.File]::ReadAllText($overridePath)
+    Assert-Proof ($overrideYaml.Contains("device: 'models''device'`n"))
+    Assert-Proof ($overrideYaml.Contains("source: 'D:\path with '' quote'`n"))
+    Assert-ReleaseOverride $overridePath 'D:\path with '' quote'
+    Reject { Assert-ReleaseOverride $overridePath 'D:\other' }
+    # Malformed or tampered mount generation must fail closed; never a writable evidence mount.
+    Reject { New-ReleaseOverride $overridePath '' '/models' 'D:\evidence' }
+    Reject { New-ReleaseOverride $overridePath 'release-1' '/models' 'D:\evidence' }
+    Reject { New-ReleaseOverride $overridePath $runName '' 'D:\evidence' }
+    Reject { New-ReleaseOverride $overridePath $runName '/models' '' }
+    Reject { New-ReleaseOverride $overridePath $runName '/models' "D:\bad`npath" }
+    Reject { New-ReleaseOverride (Join-Path (Join-Path $overrideTest 'missing') 'compose.release.yaml') $runName '/models' 'D:\evidence' }
+    $good = [IO.File]::ReadAllText($overridePath)
+    [IO.File]::WriteAllText($overridePath, $good.Replace("read_only: true`n", ''))
+    Reject { Assert-ReleaseOverride $overridePath 'D:\path with '' quote' }
+    [IO.File]::WriteAllText($overridePath, $good.Replace("target: /run/release`n", "target: /run/release-evil`n"))
+    Reject { Assert-ReleaseOverride $overridePath 'D:\path with '' quote' }
+    [IO.File]::WriteAllText($overridePath, $good.Replace("source: 'D:\path with '' quote'`n", "source: 'E:\elsewhere'`n"))
+    Reject { Assert-ReleaseOverride $overridePath 'D:\path with '' quote' }
+    [IO.File]::WriteAllText($overridePath, $good + "      - type: bind`n        source: 'D:\repo'`n        target: /repo`n")
+    Reject { Assert-ReleaseOverride $overridePath 'D:\path with '' quote' }
+    Reject { Assert-ReleaseOverride (Join-Path $overrideTest 'missing.yaml') 'D:\path with '' quote' }
+    # Production hardening anchors remain; the override lands only inside the per-run evidence directory.
+    $production = Get-Content -LiteralPath (Join-Path $repository 'compose.yaml') -Raw
+    Assert-Proof ($production -cmatch '(?m)^  read_only: true\r?$')
+    Assert-Proof ($production -cmatch '(?m)^  tmpfs: \[/tmp\]\r?$')
+    Assert-Proof ($production -cmatch '(?m)^  cap_drop: \[ALL\]\r?$')
+    Assert-Proof ($production -cmatch '(?m)^  security_opt: \[no-new-privileges:true\]\r?$')
+    Assert-Proof ($ast.Extent.Text -cmatch [regex]::Escape('Join-Path $directory ''compose.release.yaml'''))
+
     # No model-pull, volume deletion or second full-suite call in the coordinator.
     Assert-Proof ($ast.Extent.Text -notmatch '(?i)ollama\s+pull|down[^\r\n]*--volumes')
     Assert-Proof ([regex]::Matches($ast.Extent.Text, "Invoke-Phase 'full'").Count -eq 1)
     Write-Output "Release coordinator controls: $script:passed passed; 0 failed (no Docker)."
 } finally {
     # Only known, UUID-scoped test files; no recursive filesystem deletion.
-    foreach ($file in @($junit, (Join-Path $temporary 'source\safe.log'), (Join-Path $temporary 'target\1.log'))) {
+    foreach ($file in @($junit, (Join-Path $temporary 'source\safe.log'), (Join-Path $temporary 'target\1.log'),
+            (Join-Path $temporary 'override-test\compose.release.yaml'))) {
         if (Test-Path -LiteralPath $file -PathType Leaf) { Remove-Item -LiteralPath $file }
     }
     foreach ($name in @('loadSource', 'metadataSource', 'inventory', 'metrics', 'migrationSource')) {
@@ -224,7 +284,8 @@ try {
         if (Test-Path -LiteralPath $file -PathType Leaf) { Remove-Item -LiteralPath $file }
     }
     foreach ($dir in @((Join-Path $temporary 'protect-construction'), (Join-Path $temporary 'protect-real'),
-            (Join-Path $temporary 'protect-malformed'), (Join-Path $temporary 'source'), (Join-Path $temporary 'target'), $temporary)) {
+            (Join-Path $temporary 'protect-malformed'), (Join-Path $temporary 'source'), (Join-Path $temporary 'target'),
+            (Join-Path $temporary 'override-test'), $temporary)) {
         if (Test-Path -LiteralPath $dir -PathType Container) { [IO.Directory]::Delete($dir, $false) }
     }
 }
