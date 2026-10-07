@@ -1,7 +1,7 @@
 """Real PostgreSQL evidence; SQLite/mocks are never isolation evidence."""
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
@@ -575,7 +575,7 @@ def test_fixture_audit_cleanup_failure_cannot_commit_a_disabled_guard(
 
     with store.migration.begin() as connection:
         set_context(connection, store.tenant_a)
-        before = (
+        before: Sequence[UUID] = (
             connection.execute(text("SELECT id FROM arbiter.audit_events ORDER BY id"))
             .scalars()
             .all()
