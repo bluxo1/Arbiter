@@ -10,6 +10,7 @@ import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
+from retention_cleanup import delete_fixture_audits
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError
@@ -116,13 +117,19 @@ def members() -> Iterator[Members]:
                     text("SELECT set_config('arbiter.tenant_id', :tenant, true)"),
                     {"tenant": str(tenant)},
                 )
-                for query in (
-                    "DELETE FROM arbiter.api_keys WHERE tenant_id=:tenant",
-                    "DELETE FROM arbiter.audit_events WHERE tenant_id=:tenant",
-                    "DELETE FROM arbiter.memberships WHERE tenant_id=:tenant",
-                    "DELETE FROM arbiter.tenants WHERE tenant_id=:tenant",
-                ):
-                    connection.execute(text(query), {"tenant": tenant})
+                connection.execute(
+                    text("DELETE FROM arbiter.api_keys WHERE tenant_id=:tenant"),
+                    {"tenant": tenant},
+                )
+                delete_fixture_audits(connection, tenant)
+                connection.execute(
+                    text("DELETE FROM arbiter.memberships WHERE tenant_id=:tenant"),
+                    {"tenant": tenant},
+                )
+                connection.execute(
+                    text("DELETE FROM arbiter.tenants WHERE tenant_id=:tenant"),
+                    {"tenant": tenant},
+                )
             connection.execute(
                 text("DELETE FROM arbiter.principals WHERE subject IN (:a,:b)"),
                 {"a": subject_a, "b": subject_b},
@@ -319,7 +326,7 @@ def test_lookup_owner_and_grants_are_narrow(members: Members) -> None:
           WHERE n.nspname='arbiter' AND c.relrowsecurity AND c.relforcerowsecurity
         """)
             ).scalar_one()
-            == 11
+            == 13
         )
 
 

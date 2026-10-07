@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from retention_cleanup import delete_fixture_audits
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import DBAPIError
@@ -109,12 +110,15 @@ def store() -> Iterator[Store]:
         with value.migration.begin() as connection:
             for tenant in (value.tenant_a, value.tenant_b):
                 set_context(connection, tenant)
-                for statement in (
-                    "DELETE FROM arbiter.audit_events WHERE tenant_id=:tenant",
-                    "DELETE FROM arbiter.memberships WHERE tenant_id=:tenant",
-                    "DELETE FROM arbiter.tenants WHERE tenant_id=:tenant",
-                ):
-                    connection.execute(text(statement), {"tenant": tenant})
+                delete_fixture_audits(connection, tenant)
+                connection.execute(
+                    text("DELETE FROM arbiter.memberships WHERE tenant_id=:tenant"),
+                    {"tenant": tenant},
+                )
+                connection.execute(
+                    text("DELETE FROM arbiter.tenants WHERE tenant_id=:tenant"),
+                    {"tenant": tenant},
+                )
             connection.execute(
                 text("DELETE FROM arbiter.principals WHERE id IN (:a,:b)"),
                 {"a": value.principal_a, "b": value.principal_b},
@@ -468,9 +472,12 @@ def test_policy_and_grant_catalog_matches_security_contract(store: Store) -> Non
             ("audit_events", True, True, "arbiter_migration"),
             ("budget_windows", True, True, "arbiter_migration"),
             ("capacity_clearances", True, True, "arbiter_migration"),
+            ("dispatched_provider_bindings", True, True, "arbiter_migration"),
+            ("idempotency_tombstones", True, True, "arbiter_migration"),
             ("memberships", True, True, "arbiter_migration"),
             ("model_registry_journal", False, False, "arbiter_migration"),
             ("principals", False, False, "arbiter_migration"),
+            ("provider_model_bindings", False, False, "arbiter_migration"),
             ("provider_models", False, False, "arbiter_migration"),
             ("quota_windows", True, True, "arbiter_migration"),
             ("requests", True, True, "arbiter_migration"),
@@ -485,7 +492,7 @@ def test_policy_and_grant_catalog_matches_security_contract(store: Store) -> Non
             WHERE table_schema='arbiter' AND column_name='tenant_id' AND is_nullable='NO'
         """)
             ).scalar_one()
-            == 11
+            == 13
         )
         assert (
             connection.execute(
@@ -556,3 +563,73 @@ def test_production_pool_factory_uses_only_runtime_credentials() -> None:
             assert TenantRepository(transaction).get() is None
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize("failure_stage", ["deferred_fk", "enable"])
+def test_fixture_audit_cleanup_failure_cannot_commit_a_disabled_guard(
+    store: Store, failure_stage: str
+) -> None:
+    def fail_enable(*args: object) -> None:
+        if args[2] == "ALTER TABLE arbiter.audit_events ENABLE TRIGGER retention_delete_guard":
+            raise RuntimeError("fixture guard restoration interrupted")
+
+    with store.migration.begin() as connection:
+        set_context(connection, store.tenant_a)
+        before = (
+            connection.execute(text("SELECT id FROM arbiter.audit_events ORDER BY id"))
+            .scalars()
+            .all()
+        )
+        if failure_stage == "deferred_fk":
+            # This table is created and dropped in this transaction; it never persists.
+            connection.execute(
+                text("""
+                    CREATE TABLE arbiter.fixture_audit_cleanup_reference (
+                        tenant_id uuid NOT NULL, audit_id uuid NOT NULL,
+                        FOREIGN KEY (tenant_id,audit_id)
+                            REFERENCES arbiter.audit_events(tenant_id,id)
+                            DEFERRABLE INITIALLY DEFERRED
+                    )
+                """)
+            )
+            connection.execute(
+                text("INSERT INTO arbiter.fixture_audit_cleanup_reference VALUES (:tenant,:id)"),
+                {"tenant": store.tenant_a, "id": store.audit_a},
+            )
+            with pytest.raises(DBAPIError) as failure:
+                delete_fixture_audits(connection, store.tenant_a)
+            assert postgres_error(failure.value).sqlstate == "23503"
+            connection.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+            connection.execute(text("DROP TABLE arbiter.fixture_audit_cleanup_reference"))
+        else:
+            event.listen(connection, "before_cursor_execute", fail_enable)
+            try:
+                with pytest.raises(RuntimeError, match="fixture guard restoration interrupted"):
+                    delete_fixture_audits(connection, store.tenant_a)
+            finally:
+                event.remove(connection, "before_cursor_execute", fail_enable)
+        assert (
+            connection.execute(text("SELECT id FROM arbiter.audit_events ORDER BY id"))
+            .scalars()
+            .all()
+            == before
+        )
+        # Catch the helper failure, then deliberately commit the outer transaction.
+    with store.migration.begin() as connection:
+        assert (
+            connection.execute(
+                text("""
+                SELECT tgenabled FROM pg_trigger
+                WHERE tgrelid='arbiter.audit_events'::regclass
+                    AND tgname='retention_delete_guard'
+            """)
+            ).scalar_one()
+            == "O"
+        )
+    with store.migration.begin() as connection, pytest.raises(DBAPIError) as denied:
+        set_context(connection, store.tenant_a)
+        connection.execute(
+            text("DELETE FROM arbiter.audit_events WHERE tenant_id=:tenant"),
+            {"tenant": store.tenant_a},
+        )
+    assert postgres_error(denied.value).sqlstate == "42501"

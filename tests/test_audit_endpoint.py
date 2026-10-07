@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from retention_cleanup import delete_fixture_audits
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Connection
 from test_membership import Members
@@ -21,6 +22,7 @@ from arbiter.identity.oidc import OidcVerifier
 from arbiter.main import create_app
 from arbiter.operations.audit import AuditService
 from arbiter.operations.provision import ProvisioningService
+from arbiter.operations.retention import RetentionService
 from arbiter.persistence.operator import operator_transaction
 
 pytestmark = [
@@ -142,32 +144,55 @@ async def test_empty_page_and_cursor_after_deleted_anchor(
     client: httpx.AsyncClient, members: Members
 ) -> None:
     token = members.token()
+    # The anchor disappears through the supported retention path: a historical standalone
+    # audit fixture is eligible for arbiter.retire_history, while fresh provisioning
+    # evidence deliberately is not.
+    anchor = uuid4()
+    with operator_transaction(members.operator, members.tenant_a) as scoped:
+        scoped.connection().execute(
+            text("""
+                INSERT INTO arbiter.audit_events
+                (id,tenant_id,actor_type,actor_reference,action,target_id,policy_revision,
+                 request_id,occurred_at,outcome)
+                VALUES (:id,:tenant,'operator','arbiter_operator','fixture_audit',:target,
+                        1,:request,:time,'succeeded')
+            """),
+            {
+                "id": anchor,
+                "tenant": members.tenant_a,
+                "target": members.tenant_a,
+                "request": uuid4(),
+                "time": datetime(2026, 1, 1, tzinfo=UTC),
+            },
+        )
     first = await client.get(url(members.tenant_a), headers=auth(token), params={"page_size": "1"})
-    anchor = UUID(first.json()["data"][0]["id"])
+    assert first.status_code == 200
+    assert first.json()["data"][0]["id"] == str(anchor)
     cursor = first.json()["next_cursor"]
+    assert cursor is not None
+    result = RetentionService(members.operator).retire_history(members.tenant_a)
+    assert result.standalone_audits_removed == 1
     with members.migration.begin() as connection:
         connection.execute(
             text("SELECT set_config('arbiter.tenant_id',:tenant,true)"),
             {"tenant": str(members.tenant_a)},
         )
-        connection.execute(
-            text("DELETE FROM arbiter.audit_events WHERE tenant_id=:tenant AND id=:id"),
-            {"tenant": members.tenant_a, "id": anchor},
+        assert (
+            connection.execute(
+                text("SELECT id FROM arbiter.audit_events WHERE tenant_id=:tenant AND id=:id"),
+                {"tenant": members.tenant_a, "id": anchor},
+            ).one_or_none()
+            is None
         )
     next_page = await client.get(
-        url(members.tenant_a), headers=auth(token), params={"cursor": cursor}
+        url(members.tenant_a), headers=auth(token), params={"cursor": cursor, "page_size": "1"}
     )
     assert next_page.status_code == 200 and len(next_page.json()["data"]) == 1
     assert next_page.json()["data"][0]["id"] != str(anchor)
+    # Retention leaves retention_cleaned evidence. Only the empty-page setup uses
+    # owner-only fixture cleanup; the cursor anchor above was retired with its guard active.
     with members.migration.begin() as connection:
-        connection.execute(
-            text("SELECT set_config('arbiter.tenant_id',:tenant,true)"),
-            {"tenant": str(members.tenant_a)},
-        )
-        connection.execute(
-            text("DELETE FROM arbiter.audit_events WHERE tenant_id=:tenant"),
-            {"tenant": members.tenant_a},
-        )
+        delete_fixture_audits(connection, members.tenant_a)
     empty = await client.get(url(members.tenant_a), headers=auth(token))
     assert empty.status_code == 200 and empty.json() == {"data": [], "next_cursor": None}
 

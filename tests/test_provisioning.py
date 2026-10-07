@@ -10,6 +10,7 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
+from retention_cleanup import delete_fixture_audits
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -76,12 +77,15 @@ def local() -> Iterator[LocalStore]:
                     text("SELECT set_config('arbiter.tenant_id', :tenant, true)"),
                     {"tenant": str(tenant)},
                 )
-                for statement in (
-                    "DELETE FROM arbiter.audit_events WHERE tenant_id=:tenant",
-                    "DELETE FROM arbiter.memberships WHERE tenant_id=:tenant",
-                    "DELETE FROM arbiter.tenants WHERE tenant_id=:tenant",
-                ):
-                    connection.execute(text(statement), {"tenant": tenant})
+                delete_fixture_audits(connection, tenant)
+                connection.execute(
+                    text("DELETE FROM arbiter.memberships WHERE tenant_id=:tenant"),
+                    {"tenant": tenant},
+                )
+                connection.execute(
+                    text("DELETE FROM arbiter.tenants WHERE tenant_id=:tenant"),
+                    {"tenant": tenant},
+                )
             connection.execute(
                 text("DELETE FROM arbiter.principals WHERE issuer=:issuer"),
                 {"issuer": value.issuer},
