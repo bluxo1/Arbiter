@@ -5,11 +5,13 @@ import os
 import secrets
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from io import StringIO
 from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from production_logs import production_logs as production_logs
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DBAPIError
@@ -353,7 +355,7 @@ async def test_foreign_altered_and_audit_cursors_cannot_enumerate_keys(
 async def test_secrets_verifiers_and_internal_fields_never_reach_listing(
     client: httpx.AsyncClient,
     members: Members,
-    caplog: pytest.LogCaptureFixture,
+    production_logs: StringIO,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     headers = auth(members.token(subject=members.subject_b))
@@ -386,6 +388,8 @@ async def test_secrets_verifiers_and_internal_fields_never_reach_listing(
     assert response.status_code == 200 and set(response.json()["data"][0]) == FIELDS
     denied = await client.get(url(members.tenant_b), headers=headers, params={"cursor": value})
     assert_error(denied, 422, "invalid_fields")
+    logs = production_logs.getvalue()
+    assert '"component": "httpx"' in logs, "production request logging must be exercised"
     for sensitive in (
         value,
         encoded,
@@ -393,7 +397,7 @@ async def test_secrets_verifiers_and_internal_fields_never_reach_listing(
         verifier.hex(),
         base64.b64encode(verifier).decode(),
     ):
-        if sensitive in response.text or sensitive in denied.text or sensitive in caplog.text:
+        if sensitive in response.text or sensitive in denied.text or sensitive in logs:
             pytest.fail("secret or verifier leaked")
     for statement in (
         "SELECT verifier FROM arbiter.api_keys",

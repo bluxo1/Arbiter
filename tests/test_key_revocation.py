@@ -5,12 +5,14 @@ import base64
 import os
 import secrets
 from collections.abc import AsyncIterator
+from io import StringIO
 from threading import Event
 from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from production_logs import production_logs as production_logs
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.exc import DBAPIError
 from test_audit_endpoint import assert_error, auth
@@ -566,7 +568,7 @@ async def test_direct_function_rejects_active_member_and_nonexistent_key(
 
 
 async def test_secret_verifier_absence_and_workload_routes_remain_unavailable(
-    client: httpx.AsyncClient, members: Members, caplog: pytest.LogCaptureFixture
+    client: httpx.AsyncClient, members: Members, production_logs: StringIO
 ) -> None:
     created = await client.post(
         f"/v1/tenants/{members.tenant_b}/keys", headers=admin(members), json=VALID
@@ -580,6 +582,8 @@ async def test_secret_verifier_absence_and_workload_routes_remain_unavailable(
         await client.get(f"/v1/tenants/{members.tenant_b}/audit", headers=admin(members)),
         await client.post(url(members.tenant_b, data["api_key"]), headers=admin(members)),
     ]
+    logs = production_logs.getvalue()
+    assert '"component": "httpx"' in logs, "production request logging must be exercised"
     for sensitive in (
         data["api_key"],
         data["api_key"].split(".")[2],
@@ -587,7 +591,7 @@ async def test_secret_verifier_absence_and_workload_routes_remain_unavailable(
         base64.b64encode(bytes(stored.verifier)).decode(),
     ):
         if (
-            sensitive in caplog.text
+            sensitive in logs
             or sensitive in str(audits(members, members.tenant_b))
             or any(sensitive in response.text for response in responses)
         ):
