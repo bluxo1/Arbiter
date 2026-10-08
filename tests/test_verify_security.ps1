@@ -1,3 +1,5 @@
+param([switch]$Integration)
+
 $ErrorActionPreference = 'Stop'
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $errors = $null
@@ -5,7 +7,7 @@ $tokens = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile(
     (Join-Path $repository 'scripts/verify-security.ps1'), [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw 'Security script syntax failed.' }
-foreach ($name in @('Read-TrivyReport', 'Assert-RepositorySecretReport')) {
+foreach ($name in @('Read-TrivyReport', 'Assert-RepositorySecretReport', 'Get-RepositorySecretSkipDirectories')) {
     $function = $ast.Find({ param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
     }, $true)
@@ -80,4 +82,67 @@ $script:passed++
 $report.Results[0].Secrets = @([PSCustomObject]@{ RuleID = 'inert-repository-secret'; Severity = 'HIGH' })
 $verified = Read-TrivyReport ($report | ConvertTo-Json -Depth 8) '/scan' 0 0
 Expect-Rejection { Assert-RepositorySecretReport $verified }
+
+# A real disposable Git index proves the precise boundary, including force-added
+# files under an ignored environment. Optional live scans use only inert material.
+$temporary = Join-Path ([IO.Path]::GetTempPath()) ('arbiter-security-' + [Guid]::NewGuid().ToString('N'))
+$fixture = Join-Path $temporary 'repository'
+function Invoke-FixtureGit([string[]]$Arguments) {
+    & git -C $fixture @Arguments | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Security Git fixture command failed.' }
+}
+function Assert-SkipDirectories([string[]]$Expected) {
+    $actual = @(Get-RepositorySecretSkipDirectories $fixture)
+    if (($actual -join ',') -cne ($Expected -join ',')) { throw 'Secret-scan exclusion boundary failed.' }
+    $script:passed++
+}
+try {
+    New-Item -ItemType Directory -Path (Join-Path $fixture '.venv'), (Join-Path $fixture 'scripts'),
+        (Join-Path $fixture 'deploy') -Force | Out-Null
+    Invoke-FixtureGit @('init', '--quiet')
+    [IO.File]::WriteAllText((Join-Path $fixture '.venv/probe.txt'), ('SENTINEL_' + 'API_KEY_SECRET'))
+    [IO.File]::WriteAllText((Join-Path $fixture 'candidate.txt'), 'safe candidate')
+    Assert-SkipDirectories @('/scan/repository/.git')
+    [IO.File]::WriteAllText((Join-Path $fixture '.gitignore'), ".venv/`n")
+    Invoke-FixtureGit @('add', '.gitignore', 'candidate.txt')
+    Assert-SkipDirectories @('/scan/repository/.git', '/scan/repository/.venv')
+    Invoke-FixtureGit @('add', '--force', '.venv/probe.txt')
+    Assert-SkipDirectories @('/scan/repository/.git')
+    Invoke-FixtureGit @('rm', '--cached', '--quiet', '.venv/probe.txt')
+    Assert-SkipDirectories @('/scan/repository/.git', '/scan/repository/.venv')
+    Expect-Rejection { Get-RepositorySecretSkipDirectories (Join-Path $temporary 'missing') }
+
+    if ($Integration) {
+        Copy-Item -LiteralPath (Join-Path $repository 'scripts/verify-security.ps1') -Destination (Join-Path $fixture 'scripts/verify-security.ps1')
+        Copy-Item -LiteralPath (Join-Path $repository 'deploy/trivy-secret.yaml') -Destination (Join-Path $fixture 'deploy/trivy-secret.yaml')
+        Invoke-FixtureGit @('add', 'scripts/verify-security.ps1', 'deploy/trivy-secret.yaml')
+        $runner = Join-Path $fixture 'scripts/verify-security.ps1'
+        $clean = & $runner -Operation secrets -EvidenceRoot $temporary | ConvertFrom-Json
+        if ($clean.positive_control -ne $true -or $clean.findings -ne 0) { throw 'Ignored environment live scan failed.' }
+        $script:passed++
+
+        [IO.File]::WriteAllText((Join-Path $fixture 'candidate.txt'), ('SENTINEL_' + 'API_KEY_SECRET'))
+        $rejected = $false
+        try { & $runner -Operation secrets -EvidenceRoot $temporary | Out-Null }
+        catch { if ($_.Exception.Message -cne 'Repository secret scan failed.') { throw }; $rejected = $true }
+        if (-not $rejected) { throw 'Live repository finding was accepted.' }
+        $script:passed++
+
+        [IO.File]::WriteAllText((Join-Path $fixture 'candidate.txt'), 'safe candidate')
+        Invoke-FixtureGit @('add', '--force', '.venv/probe.txt')
+        $rejected = $false
+        try { & $runner -Operation secrets -EvidenceRoot $temporary | Out-Null }
+        catch { if ($_.Exception.Message -cne 'Repository secret scan failed.') { throw }; $rejected = $true }
+        if (-not $rejected) { throw 'Live tracked environment finding was accepted.' }
+        $script:passed++
+    }
+} finally {
+    # The resolved UUID-scoped fixture must remain under this test's temp root.
+    $resolved = [IO.Path]::GetFullPath($temporary)
+    $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
+    if (-not $resolved.StartsWith($tempRoot + '\arbiter-security-', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Unexpected security fixture cleanup path.'
+    }
+    Remove-Item -LiteralPath $resolved -Recurse -Force
+}
 Write-Output "$script:passed security-script cases passed"

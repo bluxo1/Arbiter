@@ -96,7 +96,10 @@ upgrade or exception allowlist is implicit. This is not an OS/container CVE scan
 Secret scan uses the existing immutable Trivy 0.74.0 image with built-in rules
 plus a narrow sentinel rule. It first requires detection of an external inert
 positive-control file, then scans the checkout including docs/tests/config/scripts.
-Only `.git` object storage is excluded; no broad source classes are suppressed.
+`.git` object storage is excluded. The root `.venv` host environment is excluded
+only when Git confirms it is ignored and contains no tracked files; force-added
+files keep that entire directory in scope. Git inspection errors fail closed.
+Other ignored paths remain in scope; no broad source classes are suppressed.
 Matched secret values are never printed or persisted by the runner; it reports
 sanitized finding counts and exits nonzero on any finding/scanner failure.
 Report validation requires the pinned schema/version, filesystem artifact type,

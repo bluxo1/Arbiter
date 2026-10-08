@@ -67,6 +67,23 @@ function Assert-RepositorySecretReport($Report) {
     if ($findings.Count -ne 0) { throw 'Repository secret scan failed.' }
 }
 
+function Get-RepositorySecretSkipDirectories([string]$Repository) {
+    # Exclude only this known generated host environment, never tracked files or
+    # arbitrary ignored paths (which can include local configuration/secrets).
+    $global:LASTEXITCODE = $null
+    $tracked = @(& git -C $Repository ls-files --cached -- .venv)
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot establish tracked secret-scan boundary.' }
+    $global:LASTEXITCODE = $null
+    & git -C $Repository check-ignore --quiet -- .venv
+    $ignored = $LASTEXITCODE
+    if ($ignored -notin @(0, 1)) { throw 'Cannot establish ignored secret-scan boundary.' }
+    $skip = @('/scan/repository/.git')
+    if ($ignored -eq 0 -and $tracked.Count -eq 0) {
+        $skip += '/scan/repository/.venv'
+    }
+    return $skip
+}
+
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $evidence = [IO.Path]::GetFullPath($EvidenceRoot)
 if ($evidence -eq $repository -or $evidence.StartsWith($repository + '\', [StringComparison]::OrdinalIgnoreCase)) {
@@ -76,6 +93,7 @@ New-Item -ItemType Directory -Path $evidence -Force | Out-Null
 $base = @('run', '--rm', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
     '--tmpfs', '/tmp', '--mount', "type=bind,source=$repository,target=/app,readonly")
 if ($Operation -eq 'secrets') {
+    $skipDirectories = (Get-RepositorySecretSkipDirectories $repository) -join ','
     $image = 'aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969'
     $probe = Join-Path $evidence ('secret-probe-' + [Guid]::NewGuid().ToString('N') + '.txt')
     try {
@@ -97,7 +115,7 @@ if ($Operation -eq 'secrets') {
             '--format', 'json', '--timeout', '3m')
         $output = & docker @base --network none --mount "type=bind,source=$repository,target=/scan/repository,readonly" `
             --mount "type=bind,source=$probe,target=/scan/control/scan-marker.txt,readonly" `
-            $image @repositoryCommon --skip-dirs /scan/repository/.git /scan 2>$null
+            $image @repositoryCommon --skip-dirs $skipDirectories /scan 2>$null
         $code = $LASTEXITCODE
         $report = Read-TrivyReport ($output -join "`n") '/scan' $code 0
         Assert-RepositorySecretReport $report
