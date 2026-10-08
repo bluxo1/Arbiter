@@ -1,63 +1,210 @@
 # Arbiter
 
-Phase 1/2 foundation, Phase 3 governed accounting and recovery, and a bounded
-Phase 4 non-streaming chat path. Read
-[the agent workflow](docs/Agents.md) and [project memory](docs/Memory.md) before changes.
-The API exposes health, authenticated tenant audit reads, admin key creation/listing/revocation,
-and tenant-approved model catalogs for OIDC members/admins and workload API keys. Liveness returns 200;
-readiness deliberately returns 503 until all required security gates exist.
-`POST /v1/chat/completions` now enters the governed admission and dispatch path.
-Usage and request metadata endpoints expose state and accounting without replaying
-assistant output. Real-model Phase 4 exit evidence remains a separate gate.
+Arbiter is a multi-tenant LLM control plane for teams sharing local inference
+infrastructure. It authenticates people and applications, enforces tenant
+allocations before dispatch, and records durable usage and audit evidence.
 
-Migration `0011_accounting_foundation` adds tenant-owned UTC quota/budget windows,
-request/idempotency records, reservations and append-only accounting events with FORCE RLS.
-Scoped repositories read these records; runtime and operator roles have no direct write grants.
-Migration `0012_reservation_transactions` grants runtime execution of one scoped reservation
-capability owned by a non-login, non-bypass role. The internal transaction revalidates keys,
-serializes quota/budget/concurrency checks, and commits the request, reservation, accounting
-and API-key audit evidence together. Matching retries return prior-admission metadata; conflicting
-fingerprints fail without allocating again. Secrets and message content are never persisted.
-The internal Redis tenant/key rate gate runs after authenticated deduplication and before
-this reservation capability. It uses one Redis-server-time script and a 60-second
-process-incarnation recovery barrier. Migration `0016_rate_preflight` adds a restricted
-preflight capability that reads committed idempotency and rate policy before Redis;
-the locked reservation then rechecks the policy revision and authority. It does not
-reserve quota or credits before Redis accepts. The existing raw reservation
-component remains an internal PostgreSQL primitive for its established regression tests.
-The public chat route reuses this admission path and never invokes a provider directly.
-Migration `0013_undispatched_release` adds a separate restricted cleanup capability, using the
-verified in-flight key binding. It releases only reserved requests without a dispatch marker,
-restores the original windows' reserved totals, and commits terminal state, accounting and
-tenant audit together. Repeated release preserves the original outcome and evidence. Released
-requests cannot be resurrected by stale handlers; committed allocations cannot be refunded.
-No usage/request route exposes these records; dispatch settlement and lifetime maintenance remain
-future work. Cleanup is internal and has no HTTP or operator command surface.
-Migrations create no usage or production model rows.
+The implementation includes OIDC membership, scoped API keys, approved model
+catalogs, governed non-streaming chat through Ollama, request metadata, recovery,
+and bounded operator retention. PostgreSQL owns durable state; Redis enforces
+short-term request rates. Prompts and completions are never persisted or logged.
 
-Model catalogs return only active, registered aliases approved by the tenant's current policy:
-`alias`, `output_cap`, `credit_charge`, and `policy_revision`. They use encrypted tenant-bound
-cursors with default page size 50 and maximum 100. Workload catalog access requires a valid
-key, with no additional scope beyond the approved key scopes. An empty registry or current
-policy yields an empty catalog; catalog access never invokes or downloads a model.
+**Release status:** implemented features do not establish release readiness.
+`/health/live` returns 200; `/health/ready` deliberately returns 503 under the
+current conservative contract. Release acceptance requires the evidence defined
+in [delivery milestones](docs/Phases.md); dated validation history lives in
+[project memory](docs/Memory.md).
 
-Local registry provisioning uses `operator register-model`, `operator update-model`,
-and `operator bind-native-model`.
-These commands append immutable global journal evidence in the same transaction; updates
-require `--expected-revision`. Runtime and tenant HTTP identities cannot mutate this registry
-or access its journal. Tenant audit records remain separate.
+[Local setup](#local-setup) · [API](#api-access) · [Operator commands](#operator-commands)
+· [Retention](#retention) · [Development](#development-and-focused-verification)
+· [Release verification](#host-release-verification) · [Documentation](#documentation)
 
-Before registration, the trusted operator must verify the text model's exact digest, pinned
-runtime, context/output behavior and license approval. Put that prior-verification attestation
-in a protected file under `ARBITER_MODEL_APPROVALS_DIR`; preparation creates an empty protected
-directory, and only the operator container mounts it read-only at `/run/approvals`. No model
-is approved automatically. The strict JSON fields are `adapter` (`ollama`), `model_digest`,
-`runtime_digest`, `verification_digest` (SHA-256 of the retained verification evidence),
-`context_cap`, `output_cap`, `verified_text` and `license_accepted`. All digests must be
-`sha256:` followed by 64 lowercase hexadecimal characters; both attestation flags must
-describe previously completed approval. The command validates the attestation's structure
-and configuration bounds, and trusts the local operator for its truth; it does not itself
-benchmark, contact a provider, or accept a license. Retain the referenced evidence privately.
+## Scope and guarantees
+
+- Tenant authority comes from a verified API key or an OIDC identity with active
+  database membership. Caller-supplied tenant or role claims do not grant access.
+- Application scoping, PostgreSQL FORCE RLS, and composite tenant/object foreign
+  keys protect tenant-owned records. Missing tenant context denies access.
+- Admission checks identity, scopes, approved model, rate, quota, budget, and
+  capacity before committed dispatch authorization. Unavailable enforcement
+  state fails closed.
+- Each dispatched request consumes one daily quota unit and the model's fixed
+  integer credit charge. Credits are allocation units, not payments or token
+  billing. Proven undispatched reservations can be released; dispatched failures
+  and unknown outcomes remain charged.
+- Idempotency prevents duplicate allocation and dispatch. Matching retries return
+  prior-admission metadata; they never replay assistant output.
+- The supported deployment is one API worker on one Docker Compose host.
+  Streaming, automatic provider retries/fallback, caller-selected provider URLs,
+  tool execution, cloud providers, payments, and horizontal scaling are outside
+  v0.1 scope.
+
+See [product scope](docs/PRD.md), [architecture](docs/Architecture.md), and
+[implementation contracts](docs/Design.md) for the owning specifications.
+
+## Local setup
+
+The documented host is Windows with PowerShell and Docker Desktop's Linux engine
+through WSL2. Run commands from the repository root. Application images use
+Python 3.13 and hash-pinned dependencies; container versions and digests live in
+[Dockerfile](Dockerfile) and [compose.yaml](compose.yaml).
+
+Before startup, provide:
+
+- The existing OIDC issuer, identity network, and trusted CA referenced by
+  [.env.example](.env.example). Arbiter does not provision Keycloak or its users.
+  The public issuer and private container JWKS URL are distinct configuration
+  values; preserve the issuer's exact identity.
+- Protected storage under `D:\AI & ML\ArbiterData`, including secret files.
+- GPU-enabled Compose and an already installed, operator-approved Ollama model
+  when testing real inference. Startup and requests never download models.
+
+For a new checkout, copy the public configuration template and review its paths
+and OIDC settings before continuing. Keep an existing `.env` when updating:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Prepare secrets, build the application, and initialize the database explicitly:
+
+```powershell
+.\scripts\prepare-local.ps1
+$env:ARBITER_SECRETS_DIR = 'D:/AI & ML/ArbiterData/secrets'
+$env:ARBITER_DATA_LINUX_ROOT = '/run/desktop/mnt/host/d/AI & ML/ArbiterData'
+
+docker compose config --quiet
+docker compose build api
+docker compose up -d --wait postgres redis
+docker compose --profile operations run --rm bootstrap
+docker compose --profile operations run --rm migrate
+docker compose up -d --wait api ollama
+```
+
+Secret preparation preserves existing values. Bootstrap provisions database roles
+using its separate privileged credential; migrations use the migration credential.
+Neither runs during API startup. The API receives only its runtime and maintenance
+credentials plus the cursor key, API-key pepper, and request-fingerprint key.
+Keep secret values outside Git and protect the host directories: local Compose
+secrets are file mounts.
+
+Retain the pepper, cursor key, and fingerprint key/version separately from database
+backups. Pepper rotation requires reissuing affected API keys. Cursor-key rotation
+invalidates outstanding cursors. Fingerprint key rotation/key-ring support is not
+implemented; retain the key/version while live requests or retained idempotency
+tombstones require it.
+
+Only the API is published, at `127.0.0.1:8000` by default. PostgreSQL, Redis, and
+Ollama use private networks and persistent volumes backed by the configured D:
+directories. Ollama health establishes metadata availability, not model approval
+or inference readiness. External API exposure requires operator-managed TLS
+ingress and a reviewed trusted-proxy configuration.
+
+For a normal stop, drain supervised work and follow the
+[startup and shutdown runbook](docs/Recovery.md#startup-and-normal-stop).
+`docker compose down` retains persistent data; never use `down --volumes` as
+routine shutdown or recovery.
+
+## API access
+
+Management endpoints use OIDC Bearer JWTs and active database membership.
+Workload endpoints use Bearer API keys bound to one tenant, without a tenant
+selector. Key secrets are returned once at creation and cannot be retrieved.
+
+| Method and route | Access and purpose |
+| --- | --- |
+| `GET /health/live` | Minimal liveness; HTTP 200. |
+| `GET /health/ready` | Conservative readiness; currently HTTP 503. |
+| `GET /v1/models` | Valid API key; tenant-approved model catalog. |
+| `POST /v1/chat/completions` | API key with `inference:write`; governed non-streaming chat. |
+| `GET /v1/usage` | API key with `usage:read`; current UTC daily/monthly totals. |
+| `GET /v1/requests/{request_id}` | API key with `usage:read`; tenant-scoped request metadata. |
+| `GET /v1/tenants/{tenant_id}/models` | OIDC member/admin; approved model catalog. |
+| `GET /v1/tenants/{tenant_id}/usage` | OIDC member/admin; current or bounded historical usage. |
+| `GET /v1/tenants/{tenant_id}/requests/{request_id}` | OIDC member/admin; request metadata. |
+| `GET /v1/tenants/{tenant_id}/audit` | OIDC member/admin; content-free audit events. |
+| `POST /v1/tenants/{tenant_id}/keys` | OIDC admin; create a scoped key. |
+| `GET /v1/tenants/{tenant_id}/keys` | OIDC admin; list key metadata without secrets. |
+| `POST /v1/tenants/{tenant_id}/keys/{key_id}/revoke` | OIDC admin; idempotent revocation. |
+
+For chat, send `Authorization: Bearer <API key>`, `Content-Type: application/json`,
+and a required `Idempotency-Key` with a body such as:
+
+```json
+{
+  "model": "approved_alias",
+  "messages": [{"role": "user", "content": "Hello"}],
+  "max_output_tokens": 256
+}
+```
+
+Replace `approved_alias` with an active, registered alias approved in the tenant's
+policy and bound to a verified native model. An empty registry or policy produces
+an empty catalog. Catalog reads never invoke or download a model.
+
+Chat accepts 1–32 messages with `system`, `user`, or `assistant` roles, at most
+32 KiB of combined UTF-8 content, and a 64 KiB body. Output defaults to 256 tokens,
+with a maximum of 1,024 and the selected model's lower cap. Unknown fields and
+unsupported options are rejected. The response contains the generated request
+ID, public alias, assistant message, available token counts, and charged credits;
+this is a bounded interface, not full OpenAI API compatibility.
+
+Audit, key, and model lists use opaque tenant-bound cursors with a default page
+size of 50 and a maximum of 100. Pagination does not promise a frozen snapshot;
+cursors do not require their anchor row to remain present. Usage/request routes
+expose accounting and state without completion replay. See the
+[HTTP contracts](docs/Design.md#http-interface) for schemas, historical selectors,
+scope rules, and sanitized error codes.
+
+## Operator commands
+
+Operator administration uses a separate local database credential through the
+Compose operations profile. Start PostgreSQL and apply bootstrap/migrations first;
+these commands do not require API, Redis, or Ollama. There is no HTTP superuser
+or tenant-admin route for changing allocation policy or the global model registry.
+
+### Create a tenant and membership
+
+```powershell
+docker compose --profile operations run --rm operator create-tenant
+
+docker compose --profile operations run --rm operator create-member `
+  --tenant '<tenant UUID returned above>' `
+  --issuer 'https://localhost:18443/realms/arbiter' `
+  --subject '<existing issuer subject>' --role admin
+```
+
+Use the configured issuer and an existing subject from a trusted operator process.
+Membership creation records the exact issuer/subject binding; it does not create
+an OIDC account. Roles are `member` and `admin`. Every `create-tenant` invocation
+creates a distinct UUID tenant, so do not automatically retry it after a lost
+response.
+
+Suspend or reactivate a tenant with `set-tenant-status`:
+
+```powershell
+docker compose --profile operations run --rm operator set-tenant-status `
+  --tenant '<tenant UUID>' --status suspended
+```
+
+Status values are `active` and `suspended`. Mutations and their content-free audit
+evidence commit together; audit failure rolls back the operation. Operator audit
+identifies the shared database role `arbiter_operator`, not an individual human.
+
+### Register and bind an approved model
+
+Before registration, verify the exact text-model digest, pinned runtime,
+context/output behavior, and license. Retain the evidence privately and place its
+attestation under `ARBITER_MODEL_APPROVALS_DIR`, mounted read-only into the operator
+container at `/run/approvals`. Preparation creates an empty protected directory;
+it does not approve a model.
+
+The strict approval JSON contains `adapter` (`ollama`), `model_digest`,
+`runtime_digest`, `verification_digest`, `context_cap`, `output_cap`,
+`verified_text`, and `license_accepted`. Digests use `sha256:` followed by 64
+lowercase hexadecimal characters; `verification_digest` identifies the retained
+verification evidence. Both flags attest to completed approval. The CLI checks
+structure and bounds; it does not benchmark a provider or accept a license.
 
 ```powershell
 docker compose --profile operations run --rm operator register-model `
@@ -76,519 +223,221 @@ docker compose --profile operations run --rm operator bind-native-model `
   --approval /run/approvals/verified-model.json
 ```
 
-Binding a native tag advances the registered model revision atomically. A later model
-update advances it again; bind the verified native tag for that new revision before
-using it for Ollama execution. The public alias is never used as the native tag.
+These revision values illustrate a newly registered model. Updates and binding
+advance the model revision atomically and append immutable global journal
+evidence. After a later update, bind the verified native tag for the new revision
+before execution. The public alias is never the native provider tag. Registration
+does not add the alias to a tenant's approved policy.
 
-Replace placeholders only with reviewed operator inputs; these examples register nothing.
-Context/output caps may not exceed the attested limits; output is at most 1,024 and no greater
-than context. Charges are positive checked integers. Duplicate registrations and stale updates
-fail without journal success evidence. Deactivation removes the alias from subsequent tenant
-catalog reads. No CLI operation enables inference or changes tenant model approvals.
+### Set the complete tenant policy
 
-On the validated Windows/WSL2 host, prepare private files on D: and load public paths:
-
-```powershell
-.\scripts\prepare-local.ps1
-$env:ARBITER_SECRETS_DIR = 'D:/AI & ML/ArbiterData/secrets'
-$env:ARBITER_DATA_LINUX_ROOT = '/run/desktop/mnt/host/d/AI & ML/ArbiterData'
-docker compose config --quiet
-docker compose build api
-docker compose up -d --wait postgres redis
-docker compose --profile operations run --rm bootstrap
-docker compose --profile operations run --rm migrate
-docker compose up -d --wait api ollama
-```
-
-Secret preparation retains existing values. Bootstrap is an explicit, privileged
-local command; it is not part of API startup. Migrations use their own credential.
-The API receives its runtime password, audit cursor key, API key pepper and
-`request_fingerprint_key` files. `FingerprintSettings` reads the fingerprint file and its positive
-version (`ARBITER_FINGERPRINT_KEY_FILE`, `ARBITER_FINGERPRINT_VERSION`). Retain the key/version while
-their idempotency records remain in use; rotation/key-ring and tombstone maintenance are not implemented.
-Keep secret values outside Git;
-`.env.example` contains public paths only. Local Compose secrets are file mounts,
-so protect their host directory as well as restricting per-service mounts.
-
-Only API port 8000 is published, on loopback. PostgreSQL, Redis and Ollama use
-internal networks with persistent named volumes backed by the configured D:
-directories. The separately provisioned Keycloak issuer is outside this stack.
-Startup never pulls a model; the existing approved model cache is reused. Ollama
-health checks establish metadata availability only, not model readiness.
-
-See [the recovery runbook](docs/Recovery.md) for startup/stop, native PostgreSQL
-backup/fresh restore, Redis/API/provider restart and audited operator clearance.
-The focused `scripts/verify-phase3.ps1 -Phase recovery` entry point uses disposable
-databases and the existing real host fault controller; archives stay outside Git.
-
-See [restricted observability/security](docs/Observability.md) for private local
-metrics, operational alert conditions, safe logging and repeatable dependency,
-secret and textual artifact checks. These checks do not replace the release gate.
-
-Run verification in the pinned Python container image:
+After registering and activating an approved model, set all five allocation
+limits and the complete alias list:
 
 ```powershell
-docker build --target verification -t arbiter-local:verification .
-docker run --rm --network none --read-only --tmpfs /tmp arbiter-local:verification
-docker run --rm --network none --read-only --tmpfs /tmp arbiter-local:verification ruff check --no-cache .
-docker run --rm --network none --read-only --tmpfs /tmp arbiter-local:verification ruff format --check --no-cache .
-docker run --rm --network none --read-only --tmpfs /tmp arbiter-local:verification mypy --cache-dir /tmp/mypy
+docker compose --profile operations run --rm operator set-tenant-policy `
+  --tenant '<tenant UUID>' --tenant-rate 60 --key-rate 30 --daily-quota 1000 `
+  --monthly-budget 10000 --concurrency 1 --model-alias '<approved public alias>'
 ```
 
-Database foundation and tenant-isolation tests require the real migrated
-PostgreSQL instance, `ARBITER_TEST_DATABASE=1`, its network, and explicitly mounted
-runtime/operator/migration/maintenance test credentials. Do not mount privileged test credentials
-into the API. Tests exercise FORCE RLS, cross-tenant reads/writes/joins, composite
-relationships, immutable ownership, append-only audit grants, and pooled reuse.
+Repeat `--model-alias` for additional approved models; omitting it approves none.
+Each call replaces the complete policy and appends a new revision with audit
+evidence. Rate limits are per 60 seconds; quota windows are UTC days and budget
+windows are UTC months. Limits are checked nonnegative integers; zero denies new
+admission. Tenant concurrency is bounded to 0–2 under the current deployment
+capacity contract. Raising that ceiling requires a reviewed capacity change.
 
-```powershell
-docker run --rm --read-only --tmpfs /tmp --network arbiter_control `
-  -e ARBITER_TEST_DATABASE=1 `
-  --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_runtime_password,target=/run/secrets/db_runtime_password,readonly" `
-  --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_operator_password,target=/run/secrets/db_operator_password,readonly" `
-  --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_migration_password,target=/run/secrets/db_migration_password,readonly" `
-  --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_maintenance_password,target=/run/secrets/db_maintenance_password,readonly" `
-  arbiter-local:verification python -m pytest -q -p no:cacheprovider
-```
+## Retention
 
-Migration checks create and drop fresh, randomly named test databases. Run them
-separately with the bootstrap credential; they never downgrade the application DB:
-
-```powershell
-docker run --rm --read-only --tmpfs /tmp --network arbiter_control `
-  -e ARBITER_TEST_MIGRATIONS=1 `
-  --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_bootstrap_password,target=/run/secrets/db_bootstrap_password,readonly" `
-  --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_migration_password,target=/run/secrets/db_migration_password,readonly" `
-  --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_runtime_password,target=/run/secrets/db_runtime_password,readonly" `
-  --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_operator_password,target=/run/secrets/db_operator_password,readonly" `
-  --mount "type=bind,source=$env:ARBITER_SECRETS_DIR/db_maintenance_password,target=/run/secrets/db_maintenance_password,readonly" `
-  arbiter-local:verification python -m pytest -q -p no:cacheprovider tests/test_migrations.py
-```
-
-Tenant transactions take an immutable context from a trusted service and set it
-only for that SQLAlchemy transaction. The persistence module does not authenticate
-callers; the authenticated audit service establishes authority before access.
-Read repositories add explicit tenant predicates;
-audit appends derive ownership from context and commit with their caller's work.
-Global principal data has no runtime grants. Synchronous database calls must run
-outside the event loop. The bounded runtime pool has two connections, no overflow,
-five-second acquisition/connect/statement/lock limits, and a ten-second idle
-transaction limit. Repositories reject closed transactions or changed context;
-unexpected session-wide context discards the connection.
-
-Binary dependency locks include hashes for Python 3.13 on Linux amd64. Regenerate
-with `python scripts/lock_dependencies.py` in the pinned base image and review/scan
-the result. The production image contains only runtime dependencies; the separate
-verification target adds test/lint/type tools. Dependencies are installed with
-`--require-hashes`. Never use `docker compose down --volumes` as routine shutdown;
-stop with `docker compose down` to retain data.
-
-Local operator provisioning uses only the separate operator secret, through the
-operations profile. Start PostgreSQL and apply migrations first; API, Redis and
-Ollama are unnecessary for these commands:
-
-```powershell
-docker compose --profile operations run --rm operator create-tenant
-docker compose --profile operations run --rm operator create-member `
-  --tenant '<tenant UUID returned above>' `
-  --issuer 'https://localhost:18443/realms/arbiter' `
-  --subject '<existing issuer subject>' --role member
-docker compose --profile operations run --rm operator set-tenant-status `
-  --tenant '<tenant UUID returned above>' --status suspended
-```
-
-Replace the placeholders with public identifiers obtained through a trusted local
-operator process. Membership input records the exact issuer/subject binding; it
-does not verify JWTs, contact OIDC, or create an issuer account. Roles are `member`
-and `admin`. Status is `active` or `suspended`; setting the current status returns
-`changed=false` with no new mutation/audit. The operator can prepare memberships
-while a tenant is suspended. Status changes leave the allocation policy revision
-unchanged and lock the tenant row before changing status or creating a member.
-
-Successful mutations return generated object/audit/correlation IDs after commit.
-Every mutation and its operator audit event share one transaction; audit failure
-rolls back the complete operation, including a newly created global principal.
-Duplicate membership attempts fail without changing the existing role or writing
-a success event. Every `create-tenant` invocation creates a new UUID tenant; there
-is no caller-chosen tenant ID, name-based uniqueness, or automatic retry. Operator
-audit identifies the authenticated shared database role `arbiter_operator`, not
-an individually authenticated human. Runtime cannot insert operator-labelled
-audit rows, invoke operator services, or change tenant/member state. No command
-adds an HTTP route or enables inference.
-
-After explicit bootstrap and migration `0020_request_retention`, the local
-operator can retire up to 100 eligible requests and expire up to 100 eligible
-tombstones for one tenant/key in a transaction:
+Retention is explicit, bounded operator maintenance. Runtime roles have no generic
+DELETE privileges; migration-role direct deletion of protected audit/history rows
+is blocked by retention guards (`42501: retention deletion only`). Supported cleanup
+uses scoped retention functions through the operator credential and records fresh
+audit evidence in the same transaction. There is no runtime deletion endpoint or
+automatic purger.
 
 ```powershell
 docker compose --profile operations run --rm operator retire-requests `
-  --tenant <tenant-uuid> --key <key-uuid> --limit 100
+  --tenant '<tenant UUID>' --key '<key UUID>' --limit 100
+
+docker compose --profile operations run --rm operator retire-history `
+  --tenant '<tenant UUID>' --limit 100
 ```
 
-Only definite terminal requests finished at least 90 days ago qualify. Unknown
-work remains retained even after capacity clearance. Cleanup creates minimal
-idempotency tombstones before deleting the request graph, preserves aggregate
-totals and global model/binding history, and appends a content-free operator
-audit with the cutoff and removal counts. Matching retries remain 409
-`request_already_admitted`; retained tombstone status URLs return 410
-`request_retired` with only request ID and final state. Tombstones remain until
-90 days after key revocation; expiration alone does not permit deletion. This
-explicit command has no runtime HTTP surface or automatic cleanup scheduler.
+| Record | Earliest cleanup eligibility |
+| --- | --- |
+| Definite terminal request graph | 90 days after `finished_at`; only `succeeded`, `failed`, `released`, or `rejected_capacity`. |
+| Idempotency tombstone | 90 days after its API key's revocation; expiration alone is insufficient. |
+| Quota/budget window | 13 UTC calendar months after closing, with no retained references. |
+| Standalone audit event | 90 days after `occurred_at`, with no retained references. |
 
-After migration `0021_history_retention`, `operator retire-history --tenant
-<tenant-uuid> --limit 100` independently removes up to 100 eligible quota windows,
-100 budget windows and 100 standalone audit events in one audited transaction.
-Windows qualify only 13 UTC calendar months after closing and while unreferenced;
-standalone audits qualify after 90 days and while unreferenced. Request audit
-evidence remains subject to request retirement. Fresh cleanup evidence starts a
-new 90-day period. Counters are never reset or recomputed. API keys are not purged,
-including revoked unreferenced keys. Run explicit request retirement first when
-its retained graph is what protects older windows.
+`retire-requests` retires up to the requested limit of eligible requests and
+expires up to that limit of eligible tombstones for one tenant/key. Before deleting
+a request graph, it preserves a minimal idempotency tombstone atomically. Matching
+retries still return 409 `request_already_admitted`; different fingerprints return
+409 `idempotency_conflict`. Retired status URLs return 410 `request_retired` with
+only the request ID and final state. Active or expired-but-unrevoked keys retain
+their tombstones indefinitely.
 
-The API runs a 10-second maintenance pass. It releases reservations older than
-30 seconds under the database state/row locks. At startup it marks prior
-nonterminal dispatched work `unknown`; that work retains effective capacity and
-blocks internal recovery admission. Before clearing an unknown request, the
-operator must verify that Ollama has no running work for it, stopping/restarting
-Ollama if needed. Record clearance only after that verification:
+`retire-history` independently removes up to the requested limit of eligible quota
+windows, budget windows, and standalone audits for one tenant. Both commands accept
+limits from 1 to 100. Run request retirement first when its retained graph protects
+older windows. Cleanup preserves aggregate totals and global model/binding
+history; it never resets or recomputes counters. API keys are not purged.
 
-```powershell
-docker compose --profile operations run --rm clearance `
-  python -m arbiter.operations.clearance `
-  --tenant '<tenant UUID>' --request '<unknown request UUID>' --provider-stopped
-```
+Unresolved requests, including `unknown` work after capacity clearance, remain
+retained. Age alone does not make referenced history eligible. Every successful
+cleanup batch, including one that removes no rows, creates new content-free audit
+evidence with its own 90-day retention period. See
+[request retention](docs/Design.md#retained-request-cleanup-and-idempotency-tombstones)
+and [history retention](docs/Design.md#aggregate-windows-and-standalone-audit-retention)
+for the exact predicates and privilege boundaries.
 
-The separate operator credential records one content-free clearance audit in
-PostgreSQL and frees the tenant concurrency slot in the same transaction. The
-next maintenance pass releases the process-local capacity claim. Committed quota
-and credits stay charged. Repeating clearance adds no second audit or release.
-The maintenance credential discovers only opaque recovery candidate IDs; it
-cannot read request content, mutate accounting, or clear unknown work. Overall
-`/health/ready` remains 503 and inference remains unavailable.
+## Recovery and diagnostics
 
-Local foundation diagnostics use only the runtime secret and need no healthy
-dependency prerequisite:
+The API runs a 10-second maintenance pass that releases abandoned, undispatched
+reservations older than 30 seconds. Startup marks prior nonterminal dispatched
+work `unknown` and reconstructs quarantined capacity. Redis restart or state loss
+requires a full 60-second recovery barrier; a successful PING does not waive it.
+
+Unknown work is never automatically retried or refunded. Operator clearance
+requires independent confirmation that provider work has stopped and that an old
+API worker cannot issue another authorized invocation. The clearance assertion
+does not inspect or cancel Ollama. Follow the
+[unknown-capacity procedure](docs/Recovery.md#operator-unknown-capacity-clearance)
+and the [backup/restore runbook](docs/Recovery.md) for incident handling.
+
+Foundation diagnostics can run without a healthy dependency prerequisite:
 
 ```powershell
 docker compose --profile operations run --rm --no-deps diagnostics
 ```
 
-Exit 0 means the PostgreSQL runtime role/schema checks and bounded Redis
-PING/INFO configuration/persistence checks passed; exit 1 means a foundation
-check failed. Output contains only fixed check names and booleans. These checks
-do not prove the complete schema or replace migration/isolation tests. They never
-read tenant records or mutate Redis. Dependency details have no HTTP route.
-`foundation_ready=true` is distinct from application readiness: output always
-reports `ready=false` while admission integration and model readiness
-gates remain unfinished. Redis PING/AOF health does not establish limiter
-state or satisfy its restart barrier. `/health/live` remains responsive during
-dependency outages; `/health/ready` remains a minimal 503 without network IO.
+Exit 0 means bounded PostgreSQL runtime-role/schema and Redis configuration checks
+passed; exit 1 means a check failed. Output contains fixed check names and
+booleans, not tenant records. Foundation checks do not certify application
+readiness or replace migration/isolation tests. Private local metrics, safe
+logging, and dependency/secret scans are described in
+[observability and security](docs/Observability.md); there is no public metrics route.
 
-For an isolated clean-stack check, use a separate Compose project name, fresh
-D: PostgreSQL/Redis directories and separate protected secret files. Reuse the
-approved model cache through a volume override; do not duplicate model bytes.
-Follow the same explicit bootstrap/migrate/start sequence above, then run the
-real isolation and disposable migration suites. Inspect actual mounts, networks
-and published ports. Stop/recreate with `down` and `up`, without `--volumes`, to
-verify retained data and credentials. See project memory for the actual closure
-evidence and Phase 1 assessment. Inference remains unavailable.
+## Development and focused verification
 
-OIDC verification and membership authorization back the audit-list endpoint.
-Key revocation, other metadata endpoints, admission and inference are unavailable.
-`OidcVerifier` is an async context manager with bounded HTTPS JWKS retrieval,
-RS256-only signature checks, exact issuer/audience checks, required `exp/iss/sub/aud`
-and validation of optional `nbf/iat`. Clock skew is configurable from 0 to 60
-seconds; cache lifetime is at most 900 seconds. Unknown key IDs refresh once per
-verification attempt. Expired cache entries never authorize using stale keys when
-refresh fails. Redirects, environment proxies and token-supplied key URLs cannot
-redirect the configured JWKS trust. Credentials and claims are not logged.
-
-Public configuration in `.env.example` references the separately provisioned
-Keycloak issuer, its private container JWKS transport and explicit local CA.
-API joins that existing identity network and receives the public CA as a read-only
-config mount; no Keycloak/admin/client credential is mounted into it. The canonical
-issuer stays `https://localhost:18443/realms/arbiter`, even though container JWKS
-retrieval uses `arbiter-p0-keycloak:8443`. The development issuer must already exist;
-Arbiter Compose does not provision it or create users. Missing/invalid trust fails
-closed when creating/using the verifier. Full application readiness remains 503.
-
-`ManagementAccess.run` verifies the token before touching PostgreSQL, resolves
-active tenant/membership using the exact `(issuer, subject)`, then constructs
-tenant context and executes a server-supplied service callback in the same scoped
-transaction. Database work runs in bounded worker threads. Tenant/role/email claims
-do not establish membership or permission; admin requirements use the database
-membership role. Each call rechecks membership and tenant status; no successful
-authorization cache exists. No function constructs context from an unchecked
-HTTP header or body. The separate Bearer parser rejects duplicate/mixed credential
-headers, and is used by the audit endpoint.
-
-Before applying revision `0004_identity_lookup`, repeat the explicit bootstrap
-command. It provisions a dedicated non-login, non-superuser, NOBYPASSRLS lookup
-owner and gives only the trusted migration role non-inheriting ownership-management
-membership. The lookup owner has column-level SELECT and two explicit SELECT RLS
-policies, with no schema-create or write privileges. Its fixed-search-path,
-static SECURITY DEFINER function returns only one active binding for the supplied
-verified identity and tenant selector; PUBLIC/operator execution is denied. It
-does not set tenant context. Runtime can execute that narrow function, cannot
-assume the owner role or read the global principal directory, and retains all
-ordinary FORCE RLS protections. Arbitrary SQL executing forged identity parameters
-is outside the documented application trust boundary. Later dispatch must recheck
-authority and serialize security mutations; this task supplies no dispatch-race
-or complete Phase 2 claim.
-
-`GET /v1/tenants/{tenant_id}/audit` accepts a member/admin OIDC Bearer token.
-The tenant path selects an active membership; headers and JWT tenant/role claims
-cannot grant access. Authentication and membership precede cursor validation and
-repository reads. Unauthorized and nonexistent tenants both return generic 404;
-invalid credentials return 401; invalid list parameters return sanitized 422;
-unavailable identity/database dependencies return 503. Responses include
-`Cache-Control: no-store`; errors contain a server-generated request ID.
-
-Query parameters are `page_size` (default 50, range 1–100) and optional `cursor`.
-Duplicate/unknown query parameters are rejected. The response is
-`{"data": [...], "next_cursor": null-or-string}`. Events expose only ID, actor type,
-actor membership ID, action, target ID, policy revision, correlation request ID,
-UTC timestamp and sanitized outcome. Identity claims, actor-reference text and
-conversation content are not serialized. Pagination uses ascending
-`(occurred_at, id)` keyset order and retrieves at most page size plus one row.
-It does not promise a frozen snapshot across pages while new events are appended.
-
-Cursors use AES-256-GCM with a random nonce and authenticated tenant/list binding;
-positions and tenant IDs are encrypted. Foreign, altered or malformed cursors
-receive the same 422 after membership authorization. Cursors remain valid after
-API restart with the same deployment key and do not require the anchor row to
-remain present. Rotation invalidates outstanding cursors; restart pagination
-from its first page. Preparation generates an independent 32-byte base64
-`audit_cursor_key` in the protected secret directory and retains it on repetition.
-Only API mounts it. Missing/invalid cursor key or OIDC configuration prevents
-startup; startup performs no schema mutation or JWKS request. HTTPS/DB clients
-are disposed during shutdown and file/certificate/database work stays outside
-the event loop. Approved behavior contracts remain in [Design.md](docs/Design.md).
-
-`POST /v1/tenants/{tenant_id}/keys` requires a verified OIDC token and an active
-database admin membership. The strict JSON body accepts `label` (1–64 printable
-ASCII characters, nonblank), `scopes` (a nonempty, duplicate-free subset of
-`inference:write` and `usage:read`), and optional `expires_at` (an aware timestamp).
-Omitting expiration gives 30 days; explicit expiration must be in the future and
-within 90 days, measured by PostgreSQL after acquiring the tenant lock. Unknown
-fields, duplicate JSON fields and query parameters are rejected; bodies are
-limited to 64 KiB before parsing. JWT tenant/role claims cannot grant permission.
-
-The 201 response contains `id`, `public_id`, `label`, `scopes`, `created_at`,
-`expires_at`, `api_key` and a correlation `request_id`, with `Cache-Control: no-store`.
-The credential format is `arb1.<32-character public identifier>.<43-character
-base64url secret>`; the secret contains 32 random bytes. Store the returned
-credential securely at the caller. It cannot be retrieved or replayed after a
-lost response. Repeated valid POSTs create distinct keys; creation has no
-idempotency contract. Workload verification uses the restricted service described below.
-Creating a key does not enable inference.
-
-Preparation provisions an independent base64-encoded 32-byte `api_key_pepper`
-file and preserves it on repetition. Missing/invalid pepper prevents startup.
-`ARBITER_KEYS_PEPPER_VERSION` defaults to 1; rotation requires reissuing affected
-keys under Design.md. The verifier is HMAC-SHA-256 over the domain separator
-`arbiter/api-key/v1` followed by a zero byte, public identifier, zero byte and raw
-secret. Only the 32-byte verifier and pepper version reach persistence; the pepper
-and plaintext credential are never written to the database or audit records.
-
-Repeat bootstrap before migration `0005_api_key_creation`. It creates a separate
-NOLOGIN/NOSUPERUSER/NOBYPASSRLS key-writer owner; runtime/operator cannot assume
-that role. The fixed-search-path creation function requires matching transaction
-context, locks the tenant and rechecks active admin membership before mutation.
-It inserts the key and content-free member audit in one transaction. A deferred
-composite foreign key also requires a matching audit ID, key target, actor and
-tenant at commit. Runtime has scoped metadata-column SELECT and narrowly granted
-function execution, with no direct key INSERT/UPDATE/DELETE or verifier reads.
-The writer's tenant `UPDATE(status)` grant is required for `FOR UPDATE`; its
-NOLOGIN role has no runtime membership or schema CREATE. FORCE RLS applies to
-keys and all other tenant tables. Key metadata is immutable; revocation can only
-set a previously null timestamp, which cannot later be cleared or changed.
-
-`GET /v1/tenants/{tenant_id}/keys` requires verified OIDC identity and an active
-database admin membership. It returns `{"data": [...], "next_cursor": null-or-string}`
-with only `id`, `public_id`, `label`, `scopes`, `created_at`, `expires_at` and
-`revoked_at` per key. It includes expired and revoked metadata without enabling
-those credentials. It never queries verifiers or pepper versions and never issues,
-returns or reconstructs secrets. No key-detail route is exposed.
-
-Query parameters are `page_size` (default 50, range 1–100) and optional `cursor`.
-Duplicate/unknown parameters are rejected after identity/membership/admin checks.
-Pagination uses ascending UUID keyset order on the existing `(tenant_id,id)` index,
-fetching at most page size plus one row. UUID order is not creation-time order;
-new keys may appear before a previous cursor, so separately fetched pages do not
-promise a fixed snapshot. Cursors remain usable without an anchor lookup and after
-restart with the same deployment cursor key. They use AES-256-GCM, a random nonce
-and a separate key-list purpose plus tenant binding. The existing `audit_cursor_key`
-file is reused with domain separation; audit and key-list cursors are not
-interchangeable. Rotation invalidates outstanding cursors. Unauthorized and absent
-tenants both return generic 404; insufficient admin permission returns 403;
-invalid cursors/queries return sanitized 422; unavailable dependencies return 503.
-Successful and error responses carry `Cache-Control: no-store`. This read-only task
-changes no schema, grants, RLS policy, secret provisioning or approved specification.
-
-`POST /v1/tenants/{tenant_id}/keys/{key_id}/revoke` requires verified OIDC identity
-and active database admin membership. It accepts no body or query options and
-returns 200 with only `id` and `revoked_at`, with `Cache-Control: no-store`.
-Repeated calls preserve the original revocation timestamp and append no duplicate
-mutation event. Expired keys can also be revoked. Inaccessible/absent tenant or
-key selectors share generic 404; non-admin members receive 403. Malformed input
-receives sanitized 422; dependency or audit failures receive sanitized 503.
-
-Migration `0006_api_key_revocation` grants runtime only EXECUTE on the scoped
-revocation function. Runtime still cannot directly update keys or read verifiers.
-The NOLOGIN key-writer owner receives only the additional metadata SELECT and
-`UPDATE(revoked_at)` privileges needed by that function, under FORCE RLS. Its
-fixed-search-path function requires matching context and locks the tenant before
-the key, rechecking active tenant/admin membership after acquiring the tenant
-lock. The timestamp and content-free `api_key_revoked` event commit together;
-an audit failure rolls back the mutation. The response is produced after commit.
-
-This establishes durable revocation and the lock order required of future
-dispatch checks. Fresh workload verification now rejects committed revocation;
-dispatch authorization and its full race gate remain unimplemented. No positive
-authorization cache, workload data endpoint, provider call or inference path is introduced.
-
-Workload requests have a reusable `run_workload` transport boundary and
-`WorkloadAccess` service. Neither accepts a tenant selector. A server-owned
-operation and optional required scope run only after a Bearer key resolves to
-its own key/tenant/scopes binding. Transaction-local tenant context is established
-only after successful verification and scope checks. Body, model, route and tenant
-header values cannot establish authority. Duplicate/mixed credentials deny.
-Malformed, unknown, wrong-secret, revoked, expired, wrong-pepper-version and
-suspended-tenant credentials share sanitized 401; missing scope returns 403;
-unavailable database state returns 503. No positive authorization is cached.
-
-Repeat explicit bootstrap before migration `0007_workload_key_lookup`; it
-provisions `arbiter_key_lookup` as a separate NOLOGIN/NOSUPERUSER/NOBYPASSRLS
-read-only helper owner. Only trusted migration can assume it, with non-inheriting
-membership. Runtime can only execute `resolve_api_key(public_id, candidate, version)`;
-it still cannot read stored verifiers or assume the helper role. The fixed-search-path
-helper has explicit SELECT policies and only necessary column grants on keys/tenants,
-with no mutation, principal-directory, audit-read or schema-create authority.
-
-Parsing requires the exact canonical issued format and 32 decoded secret bytes.
-Issuance and verification share the same peppered HMAC implementation. The
-candidate HMAC enters only the bound helper call, with SQLAlchemy parameters
-hidden; plaintext secrets never reach SQL. The stored verifier stays in PostgreSQL.
-The helper executes all 32 bytewise XOR/OR comparison steps, including against
-a fixed dummy value for an unknown identifier, before checking status/expiry/version.
-There is no mismatch-dependent comparison exit. This fixed-work comparison does
-not claim identical total HTTP/query latency across different indexed lookup results.
-
-Tests use a fixture-only HTTP route to exercise this boundary; it is absent from
-production. Existing management routes continue to require OIDC membership/admin
-authorization. Workload model/usage/request endpoints require their own bounded
-implementation. Verified workload identity is not dispatch authority; future
-durable admission must recheck tenant/key status under the documented lock order.
-
-Local tenant-policy administration uses the existing separately credentialed
-Compose operator command after migration `0008_tenant_policies`:
+Read [the agent workflow](docs/Agents.md), [engineering rules](docs/Rules.md),
+and [project memory](docs/Memory.md) before making changes. Use the verification
+image for the pinned Python/toolchain environment. Its default command runs
+pytest; specify a command or test target explicitly for bounded checks.
 
 ```powershell
-docker compose --profile operations run --rm operator set-tenant-policy `
-  --tenant <tenant-uuid> --tenant-rate 60 --key-rate 30 --daily-quota 1000 `
-  --monthly-budget 10000 --concurrency 1
+docker build --target verification -t arbiter-local:verification .
+
+docker run --rm --network none --read-only --tmpfs /tmp `
+  arbiter-local:verification ruff check --no-cache .
+docker run --rm --network none --read-only --tmpfs /tmp `
+  arbiter-local:verification ruff format --check --no-cache .
+docker run --rm --network none --read-only --tmpfs /tmp `
+  arbiter-local:verification mypy --strict --cache-dir=/tmp/mypy
+docker run --rm --network none --read-only --tmpfs /tmp `
+  arbiter-local:verification python -m pip check
 ```
 
-All five limits are explicit on the CLI; updates replace the complete policy.
-Repeat `--model-alias <public-alias>` to approve registered models, or omit it
-to approve none. Aliases are 1–64 lowercase ASCII letters/digits/underscore/hyphen,
-starting with a letter, unique and bounded to 32. Native model names, URLs and
-unregistered/inactive aliases deny. This migration creates only the minimal global
-registry schema needed for validation; it registers no model and grants no operator
-registry write privilege. Verified registration is a separate bounded task.
+These checks inspect the files copied when the image was built. Rebuild after
+source changes, or use the canonical harness's read-only source mount.
 
-Limits accept zero and checked nonnegative signed 64-bit integers. Concurrency is
-restricted to 0–2, the current measured deployment capacity recorded in Memory.md;
-raising that ceiling requires a reviewed deployment-capacity change. It is not a
-new measurement or an admission implementation. Tenant administrators have no
-policy route or database mutation grant, and runtime has no operator credential.
+| Environment gate | Required integration setup |
+| --- | --- |
+| `ARBITER_TEST_DATABASE=1` | Real migrated PostgreSQL, reachable network, and explicitly mounted test credentials. |
+| `ARBITER_TEST_MIGRATIONS=1` | Bootstrap/migration credentials; fresh randomly named disposable databases. |
+| `ARBITER_TEST_REDIS=1` | Real Redis with the required persistence/configuration. |
+| `ARBITER_TEST_EXIT_HOST=1` | Coordinated host fault/restart controller and disposable infrastructure. |
 
-Each accepted call, including repeated identical values, creates an immutable
-tenant-owned policy revision and content-free operator audit in one transaction.
-The first provision advances the tenant's existing revision 1 to 2; later updates
-advance by one under the tenant lock. A deferred composite foreign key binds each
-policy to its exact tenant, policy object, revision and successful operator event.
-Errors roll back policy, audit and tenant revision; output contains only IDs and
-revision after commit. ENABLE/FORCE RLS protects history; runtime may read only
-within established tenant context and cannot insert/update/delete policy records.
+Mount test credentials read-only into verification containers; privileged test
+credentials do not belong in the API. Migration tests never downgrade the
+application database. Keep fault controllers exclusive and use explicit test
+paths for focused work. [The Phase 3 harness](scripts/verify-phase3.ps1) defines
+the existing verification network, mounts, gates, and bounded groups. A run with
+integration gates disabled is not real-database or release evidence.
 
-PostgreSQL consumption and in-flight records now exist. The local policy path
-must retain its locked consumption/occupancy checks when changing live limits.
-The Redis limiter is an internal admission component; no provider call or
-public inference is enabled.
+Dependency locks target Python 3.13 on Linux amd64 and install with
+`--require-hashes`. Regenerate them with
+[the lock helper](scripts/lock_dependencies.py) in the pinned base image, then
+review and scan the result. The runtime image contains only runtime dependencies;
+the verification target adds test, lint, and type tools.
 
 ## Host release verification
 
-Run the release coordinator from **normal host Windows PowerShell** with working
-Docker Desktop Linux-engine access, from the repository root:
+Run the coordinator from **normal host Windows PowerShell** with Docker Desktop
+Linux-engine access, from the repository root:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release.ps1
 ```
 
 The default requires clean `main`, an empty index, and `main == origin/main`.
-To review only the uncommitted coordinator/docs before their checkpoint, use:
+It uses the existing disposable `arbiter-p34` PostgreSQL/Redis stack and protected
+secrets, the configured identity network/CA, GPU-enabled Compose, and the
+**already installed** model pinned by
+[the real Ollama proof](tests/phase4_exit_real_ollama.py). No model is pulled or
+substituted. The default model cache is `D:\AI & ML\ArbiterData\ollama\models`.
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release.ps1 -AllowReleaseToolingChanges
-```
+Do not run another fault/recovery controller concurrently. A shared release lock
+and active container/process checks reject detected overlap; they cannot fence
+arbitrary Docker commands issued outside the coordinator.
 
-That switch permits only unstaged `README.md`, `docs/Memory.md`,
-`scripts/verify-release.ps1`, and `tests/test_verify_release.ps1`; it never permits
-runtime, migration, or Python-test changes. Candidate revision and tooling hashes
-are recorded and checked again. The execution-policy option applies only to this
-process; it does not change machine policy.
+The coordinator runs these stages in order:
 
-Prerequisites are the existing disposable `arbiter-p34` PostgreSQL/Redis stack and
-its protected secrets, the documented identity network/CA, working GPU-enabled
-Compose, and the **already installed** model pinned by
-`tests/phase4_exit_real_ollama.py`. No model is pulled or substituted. Default
-model cache: `D:\AI & ML\ArbiterData\ollama\models`. Run no other fault/recovery
-controller concurrently. A stack-scoped exclusive release lock and active
-container/process checks reject overlapping coordinators or detected controllers;
-they cannot fence arbitrary Docker commands started manually outside this tool.
+1. Build current images and run lint, format, strict typing, dependency, syntax,
+   Compose, and security checks, including OSV and pinned Trivy positive controls.
+2. Start an isolated release Compose project with fresh unique PostgreSQL/Redis
+   storage; check migrations, healthy services, foundation diagnostics, and the
+   private metrics socket. Public readiness remains 503 under its existing contract.
+3. Run the canonical full suite once with real database, migration, Redis, and
+   host-fault gates. The default permits no deselection and requires zero failures,
+   errors, or skips.
+4. Run real pinned Ollama, same-cluster template0 backup/restore, Redis/process/
+   operator recovery, restart-barrier, and observability proofs. Validate JUnit
+   counts and required groups, then scan textual evidence.
 
-The command builds current verification/runtime images; runs static, syntax,
-Compose and security preflight (OSV, pinned Trivy and mandatory positive control);
-then starts a clean isolated `arbiter-release` Compose project with fresh unique
-PostgreSQL/Redis storage. It preserves the existing model cache, old data volumes,
-and failure evidence. It checks healthy services, migrations, foundation
-diagnostics and the private metrics socket. Public readiness deliberately remains
-HTTP 503 under the existing contract; connectivity does not authorize inference.
+A child failure stops the gate; suites are not automatically retried. A bounded
+test-only observer records model/runtime/hardware identity, three real-request
+latency samples, and controlled capacity-2 saturation. These are host-specific
+observations, not general throughput or statistically reliable p95 claims.
 
-Only after preflight/startup pass does it invoke the canonical **full suite once**,
-with the real PostgreSQL/migration/Redis/host-fault gates. Zero failures, errors and
-skips are required. The default allows no deselection. If the documented historical
-usage fixture requires the committed exception, explicitly add
-`-DeselectKnownUsageFixture`; only
-`tests/test_usage_transport.py::test_management_current_and_historical_usage`
-is then deselected and its count is reported. No other exclusion is supported.
+Evidence stays outside Git under the Phase 3 data root's `tmp\release-*`, protected
+by a private Windows ACL. `summary.json`, stage logs, and JUnit counts record
+outcomes and timings. Fresh application storage is under
+`D:\AI & ML\ArbiterData\phase5\release-*\ArbiterData`. Existing volumes/model
+assets and failure evidence are preserved. Services remain for inspection; the
+coordinator does not commit, tag, delete volumes, or declare v0.1 complete.
 
-Subsequent stages reuse the real pinned Ollama proof, same-cluster template0
-backup/restore and Redis/process/operator recovery proofs, restart barrier and
-observability suite. JUnit is inspected for nonempty execution, exact totals,
-required groups and zero skips. Child failures stop the gate with their exit code;
-no suite is automatically retried. Existing canonical child scripts may themselves
-normalize a failed container's exit to their PowerShell failure exit.
+For review of uncommitted release tooling/docs only, the coordinator also accepts
+`-AllowReleaseToolingChanges`. It permits only unstaged `README.md`,
+`docs/Memory.md`, `scripts/verify-release.ps1`, and `tests/test_verify_release.ps1`,
+and records/checks tooling hashes. It does not permit runtime, migration, or
+Python-test changes. The process-local execution-policy flag changes no machine
+policy. The historical `-DeselectKnownUsageFixture` exception is limited to its
+single committed allowlist entry; it is not part of the default gate.
 
-A bounded test-only observer records model UUID/digest/revision, runtime/hardware,
-three real-request latency samples and capacity-2 saturation with a controlled
-provider-boundary hold. It uses the real governed ASGI route and disposable
-database, not a claim about network throughput or statistically reliable p95.
-It stores no assistant output or credentials. Final textual logs/reports are
-copied into a fail-closed artifact scan; protected backup archives remain separate.
-
-Evidence is outside Git under the existing Phase 3 data root's `tmp\release-*`,
-with a private Windows ACL. `summary.json`, per-stage logs and JUnit counts retain
-the result and timings. Fresh application storage is under
-`D:\AI & ML\ArbiterData\phase5\release-*\ArbiterData`. Services/evidence remain
-for inspection; the coordinator does not delete volumes, commit, tag, or declare
-v0.1 complete. Review the exit evidence against `docs/Phases.md` and the limitations
-in `docs/Recovery.md` and `docs/Observability.md` before release.
-
-Non-Docker coordinator controls can be run independently:
+Non-Docker coordinator controls have a separate entry point:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\test_verify_release.ps1
 ```
+
+Review release evidence against [delivery milestones](docs/Phases.md),
+[recovery limitations](docs/Recovery.md), and
+[observability constraints](docs/Observability.md) before declaring completion.
+
+## Documentation
+
+| Document | Owns |
+| --- | --- |
+| [PRD](docs/PRD.md) | Product scope, actors, allocation semantics, acceptance criteria. |
+| [Architecture](docs/Architecture.md) | Components, deployment topology, trust boundaries. |
+| [Design](docs/Design.md) | HTTP contracts, schema, admission, retention, failure behavior. |
+| [Rules](docs/Rules.md) | Mandatory tenant invariants and engineering constraints. |
+| [Phases](docs/Phases.md) | Delivery order and release evidence gates. |
+| [Recovery](docs/Recovery.md) | Startup, shutdown, backup/restore, incident procedures. |
+| [Observability](docs/Observability.md) | Restricted metrics/logging and repeatable security checks. |
+| [Agents](docs/Agents.md) | Contributor and coding-agent workflow. |
+| [Memory](docs/Memory.md) | Dated implementation/validation history and handoffs. |
+| [Prompt](docs/Prompt.md) | Reusable task brief. |

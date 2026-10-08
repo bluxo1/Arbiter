@@ -6,6 +6,13 @@ This file is the persistent project brain for future sessions. It records verifi
 
 Update this project-local file after each meaningful validation or implementation session. Record facts with dates and evidence. Label proposals, assumptions, and verified outcomes separately. Preserve historical observations and identify later evidence that supersedes them. Never store credentials, personal JWT claims, prompt/completion content, or raw sensitive logs. Do not claim that installed tools, static reviews, or available hardware prove application readiness.
 
+## 2026-10-08 - README refresh; documentation checks only
+
+- **Baseline/scope:** started from a clean working tree at `a4a2c9ddba94982f31d2a2e4b863cb826a7849c9`. Only `README.md` and this history entry changed; no production, test, migration, privilege, retention, or release-tooling behavior changed.
+- **Updated:** replaced chronological implementation notes with a current overview, navigation, setup prerequisites, an API/access table, ordered operator examples, retention eligibility, recovery links, focused verification guidance, release coordinator requirements, and a document ownership map. Removed stale claims that implemented inference, metadata, dispatch, or tombstone maintenance were unavailable. Preserved the conservative HTTP 503 readiness contract and evidence requirements for release acceptance.
+- **Validation:** checked README claims against the owning specifications, Compose/Dockerfile, transport routes, operator CLI, retention service, and verification scripts. All 41 local links/heading anchors resolved; all 11 PowerShell examples parsed without execution; the JSON example parsed; Markdown code fences were balanced; `git diff --check` passed.
+- **Limits:** no pytest, provider/model proof, backup/recovery matrix, or release verifier was run. This session provides documentation checks only, not current release acceptance evidence. Changes remain uncommitted; no push.
+
 ## 2026-10-06 - Release coordinator implementation; release gate unexecuted
 
 - **Baseline/scope:** started from clean, pushed `f84b829044c42e0cb40d0aa0add10d60d3f896c9` (`feat: add observability and security hardening`), with an empty index and `origin/main...main` divergence `0 0`. Only release tooling, its non-Docker controls, README and this implementation entry changed. No production Python, migration, governance, provider, retention or recovery behavior changed. No commit/push or version/tag change.
