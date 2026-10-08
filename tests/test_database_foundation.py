@@ -70,7 +70,7 @@ def test_only_migration_role_owns_schema_and_version_marker() -> None:
         with engine.connect() as connection:
             assert (
                 connection.execute(text("SELECT version_num FROM public.alembic_version")).scalar()
-                == "0017_maintenance_recovery"
+                == "0021_history_retention"
             )
             assert (
                 connection.execute(
@@ -85,7 +85,7 @@ def test_only_migration_role_owns_schema_and_version_marker() -> None:
                 connection.execute(
                     text("SELECT count(*) FROM pg_tables WHERE schemaname = 'arbiter'")
                 ).scalar()
-                == 14
+                == 17
             )
     finally:
         engine.dispose()
