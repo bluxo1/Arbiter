@@ -1,10 +1,10 @@
 """Offline usage/request metadata boundary tests; real-PostgreSQL cases are DB-gated."""
 
 import base64
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Self, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -20,16 +20,13 @@ from arbiter.operations.usage import (
     current_window,
 )
 from arbiter.persistence.identity import InaccessibleTenant
+from arbiter.persistence.usage import UsageUnit
 from arbiter.transport.usage import router as usage_router
 
 TENANT = uuid4()
-NOW = datetime.now(UTC)
 # Fixed past selector: aligned and historical forever once the date has passed.
 DAY_START = datetime(2026, 9, 28, tzinfo=UTC)
 MONTH_START = datetime(2026, 9, 1, tzinfo=UTC)
-# Current windows track the wall clock; routes compute them from the real time.
-CURRENT_DAY = NOW.replace(hour=0, minute=0, second=0, microsecond=0)
-CURRENT_MONTH = NOW.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 AUTH = {"Authorization": "Bearer fixture-management-token"}
 
 
@@ -113,7 +110,7 @@ class FakeStore:
 
     def __init__(self) -> None:
         self.context = TenantContext(TENANT)
-        self.totals: dict[tuple[UUID, datetime], SimpleNamespace] = {}
+        self.totals: dict[tuple[UUID, UsageUnit, datetime], SimpleNamespace] = {}
         self.requests: dict[UUID, SimpleNamespace] = {}
         self.retired: dict[UUID, SimpleNamespace] = {}
 
@@ -136,7 +133,9 @@ class FakeConnection:
         elif "FROM arbiter.idempotency_tombstones" in sql:
             row = self._store.retired.get(cast(UUID, params["request"]))
         else:
-            key = (cast(UUID, params["tenant"]), cast(datetime, params["start"]))
+            unit: UsageUnit = "day" if "FROM arbiter.quota_windows" in sql else "month"
+            assert "FROM arbiter.quota_windows" in sql or "FROM arbiter.budget_windows" in sql
+            key = (cast(UUID, params["tenant"]), unit, cast(datetime, params["start"]))
             row = self._store.totals.get(key)
         return SimpleNamespace(one_or_none=lambda: row)
 
@@ -187,12 +186,17 @@ def unknown_request_row(request_id: UUID) -> SimpleNamespace:
     )
 
 
-def seeded_store(request_id: UUID) -> FakeStore:
+def seeded_store(request_id: UUID, now: datetime | None = None) -> FakeStore:
     store = FakeStore()
-    # Clock-aligned current windows plus a fixed past window for historical reads.
-    for day, month in ((CURRENT_DAY, CURRENT_MONTH), (DAY_START, MONTH_START)):
-        store.totals[(TENANT, day)] = SimpleNamespace(window_start=day, committed=3, reserved=1)
-        store.totals[(TENANT, month)] = SimpleNamespace(
+    # Compute fixture windows at use time, never at collection/import time.
+    moment = now if now is not None else datetime.now(UTC)
+    day_start = moment.replace(hour=0, minute=0, second=0, microsecond=0)
+    month_start = moment.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    for day, month in ((day_start, month_start), (DAY_START, MONTH_START)):
+        store.totals[(TENANT, "day", day)] = SimpleNamespace(
+            window_start=day, committed=3, reserved=1
+        )
+        store.totals[(TENANT, "month", month)] = SimpleNamespace(
             window_start=month, committed=30, reserved=2
         )
     store.requests[request_id] = unknown_request_row(request_id)
@@ -213,33 +217,61 @@ def test_management_retired_request_returns_minimal_410() -> None:
     }
 
 
-def test_management_current_and_historical_usage(secret_directory: Path) -> None:
-    client = TestClient(metadata_app(FakeManagementAccess(seeded_store(uuid4()))))
-    selector = f"/v1/tenants/{TENANT}/usage"
+def fixed_clock(moment: datetime) -> type[datetime]:
+    class FixedClock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(moment.timestamp(), tz)
 
-    current = client.get(selector, headers=AUTH)
-    assert current.status_code == 200
-    assert current.headers["cache-control"] == "no-store"
-    payload = current.json()
-    windows = {item["window"]: item for item in payload["data"]}
-    assert windows["day"]["committed"] == 3 and windows["day"]["reserved"] == 1
-    assert windows["month"]["committed"] == 30 and windows["month"]["reserved"] == 2
-    assert windows["day"]["window_start"].startswith(CURRENT_DAY.strftime("%Y-%m-%dT%H:%M:%S"))
-    assert list(windows["day"]) == ["window", "window_start", "committed", "reserved"]
+    return FixedClock
 
-    historical = client.get(
-        f"{selector}?window=day&window_start=2026-09-28T00:00:00Z", headers=AUTH
-    )
-    assert historical.status_code == 200
-    data = historical.json()["data"]
-    assert len(data) == 1 and data[0]["committed"] == 3
 
-    absent_window = client.get(
-        f"{selector}?window=day&window_start=2026-09-27T00:00:00Z", headers=AUTH
-    )
-    assert absent_window.status_code == 200
-    assert absent_window.json()["data"][0]["committed"] == 0
-    assert absent_window.json()["data"][0]["reserved"] == 0
+def test_management_current_and_historical_usage(
+    secret_directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The full suite can cross UTC midnight after collecting this module. Exercise
+    # both sides of day/month boundaries without coupling fixtures to wall time.
+    for moment in (
+        datetime(2026, 10, 8, 23, 59, 59, tzinfo=UTC),
+        datetime(2026, 10, 9, tzinfo=UTC),
+        datetime(2026, 10, 31, 23, 59, 59, tzinfo=UTC),
+        datetime(2026, 11, 1, tzinfo=UTC),
+    ):
+        monkeypatch.setattr("arbiter.operations.usage.datetime", fixed_clock(moment))
+        day_start = moment.replace(hour=0, minute=0, second=0, microsecond=0)
+        month_start = moment.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        with TestClient(
+            metadata_app(FakeManagementAccess(seeded_store(uuid4(), moment)))
+        ) as client:
+            selector = f"/v1/tenants/{TENANT}/usage"
+            current = client.get(selector, headers=AUTH)
+            assert current.status_code == 200
+            assert current.headers["cache-control"] == "no-store"
+            payload = current.json()
+            windows = {item["window"]: item for item in payload["data"]}
+            assert windows["day"]["committed"] == 3 and windows["day"]["reserved"] == 1
+            assert windows["month"]["committed"] == 30 and windows["month"]["reserved"] == 2
+            assert windows["day"]["window_start"].startswith(
+                day_start.strftime("%Y-%m-%dT%H:%M:%S")
+            )
+            assert windows["month"]["window_start"].startswith(
+                month_start.strftime("%Y-%m-%dT%H:%M:%S")
+            )
+            assert list(windows["day"]) == ["window", "window_start", "committed", "reserved"]
+
+            historical = client.get(
+                f"{selector}?window=day&window_start=2026-09-28T00:00:00Z", headers=AUTH
+            )
+            assert historical.status_code == 200
+            data = historical.json()["data"]
+            assert len(data) == 1 and data[0]["committed"] == 3
+
+            absent_window = client.get(
+                f"{selector}?window=day&window_start=2026-09-27T00:00:00Z", headers=AUTH
+            )
+            assert absent_window.status_code == 200
+            assert absent_window.json()["data"][0]["committed"] == 0
+            assert absent_window.json()["data"][0]["reserved"] == 0
 
 
 def test_management_request_status_shape_and_denials(secret_directory: Path) -> None:
