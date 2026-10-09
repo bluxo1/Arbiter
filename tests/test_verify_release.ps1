@@ -34,6 +34,13 @@ try {
     Export-ReleaseProbes $temporary
     Assert-Proof (@(Get-ChildItem -LiteralPath $temporary -Filter '*.py' -File).Count -eq 5)
     Assert-Proof ((Get-Content -LiteralPath (Join-Path $temporary 'loadSource.py') -Raw).Contains('def test_release_bounded_load'))
+    # Capacity rejection is a distinct terminal request state. Preserve both the
+    # durable denial and the no-charge/no-extra-generation measurement boundary.
+    $loadProbe = [IO.File]::ReadAllText((Join-Path $temporary 'loadSource.py'))
+    Assert-Proof ($loadProbe.Contains("assert denied_receipt.state == 'rejected_capacity' and denied_receipt.dispatch_audits == 0"))
+    Assert-Proof ($loadProbe.Contains('assert store.totals(actors[2]) == (0, 0, 0, 0)'))
+    Assert-Proof ($loadProbe.Contains('assert len(captured) == 2 and len(invocations) == 1'))
+    Assert-Proof ($loadProbe.Contains('assert len(invocations) == len(latencies) == 3 and len(set(invocations)) == 3'))
     [IO.File]::WriteAllText($junit, $valid)
     $result = Read-ReleaseJUnit $junit @('test_required') 0 @('1 passed in 1.00s')
     Assert-Proof ($result.executed -eq 1 -and $result.passed -eq 1 -and $result.skipped -eq 0)

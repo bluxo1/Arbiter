@@ -456,7 +456,7 @@ def test_release_bounded_load(binding_store, redis_ready, monkeypatch):
         assert receipt.dispatch_audits == receipt.terminal_audits == 1
         assert store.totals(actor) == (1, 0, 10, 0)
     (denied_receipt,) = receipts(store, actors[2])
-    assert denied_receipt.state == 'released' and denied_receipt.dispatch_audits == 0
+    assert denied_receipt.state == 'rejected_capacity' and denied_receipt.dispatch_audits == 0
     assert store.totals(actors[2]) == (0, 0, 0, 0)
     report = {'model_uuid': str(store.model), 'digest': MODEL_DIGEST, 'native_tag': NATIVE_NAME,
               'captured_revision': 3, 'samples': 3, 'single_seconds': single_latency,
