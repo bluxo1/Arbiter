@@ -1,23 +1,26 @@
 # Arbiter
 
-Arbiter is a multi-tenant LLM control plane for teams sharing local inference
-infrastructure. It authenticates people and applications, enforces tenant
-allocations before dispatch, and records durable usage and audit evidence.
+Arbiter is a **governance/control plane for local AI execution**.
 
-The implementation includes OIDC membership, scoped API keys, approved model
-catalogs, governed non-streaming chat through Ollama, request metadata, recovery,
-and bounded operator retention. PostgreSQL owns durable state; Redis enforces
-short-term request rates. Prompts and completions are never persisted or logged.
+Applications should not be able to invoke shared models without governance.
+Arbiter checks authenticated tenant identity, policy, rate, quota, budget, and
+capacity before durable dispatch authorization. Only then can Ollama execute
+an approved model. PostgreSQL owns durable state; Redis governs short-term rates.
+Arbiter does not persist prompts or completions.
 
-**Release status:** implemented features do not establish release readiness.
-`/health/live` returns 200; `/health/ready` deliberately returns 503 under the
-current conservative contract. Release acceptance requires the evidence defined
-in [delivery milestones](docs/Phases.md); dated validation history lives in
-[project memory](docs/Memory.md).
+**Current release: [v0.1.0](https://github.com/bluxo1/Arbiter/releases/tag/v0.1.0).**
+The final release gate and independent evidence review passed at
+[`59e6f299`](https://github.com/bluxo1/Arbiter/commit/59e6f299e590a79bb0d9dd1bad25053822acc762):
+**1,308 full-regression tests passed**, with **zero failures, errors, skips, or
+deselections**. Proofs exercised real PostgreSQL, Redis, pinned Ollama, migrations,
+backup/restore, fault recovery, security, observability, and bounded load/saturation.
+The signed release tag stays on that verified commit; later documentation changes
+do not change the release artifact.
 
-[Local setup](#local-setup) · [API](#api-access) · [Operator commands](#operator-commands)
-· [Retention](#retention) · [Development](#development-and-focused-verification)
-· [Release verification](#host-release-verification) · [Documentation](#documentation)
+[Quick start](#quick-start) · [Architecture](#architecture)
+· [Guarantees](#scope-and-guarantees) · [API](#api-access)
+· [Operator commands](#operator-commands) · [Recovery](#recovery-and-diagnostics)
+· [Known limitations](#known-limitations) · [Documentation](#documentation)
 
 ## Scope and guarantees
 
@@ -34,15 +37,46 @@ in [delivery milestones](docs/Phases.md); dated validation history lives in
   and unknown outcomes remain charged.
 - Idempotency prevents duplicate allocation and dispatch. Matching retries return
   prior-admission metadata; they never replay assistant output.
+- Each dispatched request permits at most one provider invocation. There is no
+  automatic provider retry, provider/model fallback, or model pull.
+- Unknown outcomes retain charged accounting and quarantined capacity. Restart
+  reconstructs durable ownership; elapsed time alone cannot free uncertain work.
+- The API runtime is read-only, uses restricted database credentials, and keeps
+  tenant audit/accounting evidence separate from conversation content.
 - The supported deployment is one API worker on one Docker Compose host.
-  Streaming, automatic provider retries/fallback, caller-selected provider URLs,
-  tool execution, cloud providers, payments, and horizontal scaling are outside
-  v0.1 scope.
+  Streaming, caller-selected provider URLs, tool execution, cloud providers,
+  payments, and horizontal scaling are outside v0.1 scope.
 
 See [product scope](docs/PRD.md), [architecture](docs/Architecture.md), and
 [implementation contracts](docs/Design.md) for the owning specifications.
 
-## Local setup
+## Architecture
+
+The governed execution path is:
+
+```text
+request -> identity / tenant -> policy / model -> Redis rate gate
+        -> durable quota / budget reservation -> capacity ownership
+        -> durable dispatch authorization -> provider -> accounting / audit
+```
+
+```mermaid
+flowchart TD
+    client["Client / application"] --> api["Arbiter: one API worker<br/>Identity and tenant context → policy → rate<br/>Quota / budget → capacity → durable dispatch"]
+    api -->|At most one invocation| ollama["Ollama"]
+    ollama --> model["Approved local model"]
+    ollama -->|Outcome| api
+    api <-->|Durable state| pg["PostgreSQL<br/>Requests / accounting / audit<br/>Ownership / bindings / retention state"]
+    api <-->|Rate enforcement| redis["Redis<br/>Admission / rate state<br/>Recovery barrier"]
+```
+
+Accounting and audit evidence commit at reservation, dispatch, and outcome
+transitions. Redis is never authority for budgets, dispatch, or capacity ownership.
+The existing OIDC issuer and local operator CLI supply identity and administration;
+they are separate trust boundaries. See the [system architecture](docs/Architecture.md)
+and [admission sequence](docs/Design.md#admission-and-dispatch) for the full model.
+
+## Quick start
 
 The documented host is Windows with PowerShell and Docker Desktop's Linux engine
 through WSL2. Run commands from the repository root. Application images use
@@ -320,6 +354,28 @@ readiness or replace migration/isolation tests. Private local metrics, safe
 logging, and dependency/secret scans are described in
 [observability and security](docs/Observability.md); there is no public metrics route.
 
+## Known limitations
+
+- v0.1.0 supports one host and one API worker. External exposure requires
+  operator-managed TLS ingress; the documented setup uses Windows, PowerShell,
+  and Docker Desktop's Linux engine.
+- Backup/restore proof uses a fresh database in the same PostgreSQL cluster;
+  fresh-host disaster recovery has not been proven.
+- Clearing unknown capacity requires operator attestation that provider work has
+  stopped and the old API worker cannot dispatch again. The command does not
+  inspect or cancel provider work.
+- Metrics reset on process restart; last observations can be stale or unobserved.
+- Secret detection is bounded. OSV advisory checks cover Python dependencies,
+  without certifying OS/container vulnerability coverage.
+- `/health/live` returns 200; public `/health/ready` deliberately remains 503
+  under the conservative contract. Inspect private recovery diagnostics.
+- Load proof contains three host-specific samples and a controlled saturation
+  check. It establishes no general throughput, latency SLA, or benchmark ranking.
+
+Read the [recovery](docs/Recovery.md) and [observability/security](docs/Observability.md)
+runbooks before operating the stack. The [v0.2 roadmap](docs/Roadmap.md) is a
+proposal; it does not extend the v0.1.0 guarantees.
+
 ## Development and focused verification
 
 Read [the agent workflow](docs/Agents.md), [engineering rules](docs/Rules.md),
@@ -438,6 +494,8 @@ Review release evidence against [delivery milestones](docs/Phases.md),
 | [Phases](docs/Phases.md) | Delivery order and release evidence gates. |
 | [Recovery](docs/Recovery.md) | Startup, shutdown, backup/restore, incident procedures. |
 | [Observability](docs/Observability.md) | Restricted metrics/logging and repeatable security checks. |
+| [v0.2 roadmap](docs/Roadmap.md) | Proposed priorities and evidence needed for the next release. |
+| [Project copy](docs/Portfolio.md) | Factual portfolio, resume, and recruiter descriptions. |
 | [Agents](docs/Agents.md) | Contributor and coding-agent workflow. |
 | [Memory](docs/Memory.md) | Dated implementation/validation history and handoffs. |
 | [Prompt](docs/Prompt.md) | Reusable task brief. |
